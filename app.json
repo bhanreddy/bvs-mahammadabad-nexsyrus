@@ -9,7 +9,7 @@
       "web"
     ],
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/icon-v2.png",
     "scheme": "testapp",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
@@ -35,9 +35,9 @@
       "versionCode": 1,
       "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "foregroundImage": "./assets/images/android-icon-foreground-v2.png",
         "backgroundColor": "#E6F4FE",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "monochromeImage": "./assets/images/android-icon-monochrome-v2.png"
       },
       "permissions": [
         "INTERNET",
@@ -46,7 +46,7 @@
       ]
     },
     "notification": {
-      "icon": "./assets/images/android-icon-monochrome.png",
+      "icon": "./assets/images/android-icon-monochrome-v2.png",
       "color": "#E6F4FE"
     },
     "plugins": [
