@@ -10,11 +10,13 @@ export const SCREEN_FEATURE_MAP: Record<string, FeatureKey> = {
   '/Screen/complaints': 'quick.complaints',
   '/Screen/lifeValues': 'quick.life_values',
   '/Screen/busTracker': 'quick.transport',
+  '/Screen/hostel': 'quick.hostel',
   '/Screen/scienceProjects': 'quick.science_projects',
   '/Screen/profile': 'quick.profile',
   '/Screen/diary': 'topbar.diary',
   '/Screen/lms': 'topbar.lms',
   '/Screen/timetable': 'nav.time_table',
   '/Screen/fees': 'nav.fees',
+  '/Screen/calendar': 'nav.calendar',
   '/Screen/attendance': 'home.todays_snapshot',
 };

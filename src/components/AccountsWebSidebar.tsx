@@ -63,11 +63,56 @@ export const ACCOUNTS_SIDEBAR_NAV: AccountsSidebarNavItem[] = [
     category: 'Fees & payments',
   },
   {
+    title: 'Fines & Penalties',
+    icon: 'shield-checkmark-outline',
+    route: '/accounts/fines',
+    gradient: ['#D97706', '#F59E0B'],
+    category: 'Fees & payments',
+    permission: 'fees.view',
+  },
+  {
+    title: 'Event Collections',
+    icon: 'ticket-outline',
+    route: '/accounts/event-collections',
+    gradient: ['#4F46E5', '#06B6D4'],
+    category: 'Fees & payments',
+  },
+  {
     title: 'Reports',
     icon: 'bar-chart-outline',
     route: '/accounts/invoices',
     gradient: ['#8B5CF6', '#6D28D9'],
     category: 'Invoices',
+  },
+  {
+    title: 'Marks Export',
+    icon: 'download-outline',
+    route: '/accounts/marks',
+    gradient: ['#2563EB', '#1D4ED8'],
+    category: 'School reports',
+  },
+  {
+    title: 'Exams',
+    icon: 'clipboard-outline',
+    route: '/accounts/exams',
+    gradient: ['#3730A3', '#0EA5E9'],
+    category: 'Academic',
+  },
+  {
+    title: 'OMR Answer Keys',
+    icon: 'key-outline',
+    route: '/accounts/omr-answer-key',
+    gradient: ['#4F46E5', '#06B6D4'],
+    category: 'Academic',
+    permission: 'omr.create_answer_key',
+  },
+  {
+    title: 'Print OMR Sheets',
+    icon: 'print-outline',
+    route: '/accounts/omr-print',
+    gradient: ['#4338CA', '#6366F1'],
+    category: 'Academic',
+    permission: 'omr.view',
   },
   {
     title: 'Certificates',
@@ -92,11 +137,40 @@ export const ACCOUNTS_SIDEBAR_NAV: AccountsSidebarNavItem[] = [
     category: 'Admissions',
   },
   {
-    title: 'Settings',
-    icon: 'settings-outline',
-    route: '/accounts/settings',
-    gradient: ['#64748B', '#475569'],
-    category: 'Preferences',
+    title: 'Student Login QR Codes',
+    icon: 'qr-code-outline',
+    route: '/accounts/student-login-qr',
+    gradient: ['#5B21B6', '#8B5CF6'],
+    category: 'Student access',
+  },
+  {
+    title: 'Role Login QR Codes',
+    icon: 'qr-code-outline',
+    route: '/accounts/role-login-qr',
+    gradient: ['#0F766E', '#0D9488'],
+    category: 'Staff access',
+  },
+  {
+    title: 'Hostel Students',
+    icon: 'bed-outline',
+    route: '/accounts/hostel',
+    gradient: ['#312E81', '#6366F1'],
+    category: 'Student services',
+    permission: 'hostel.allocate',
+  },
+  {
+    title: 'Apply Leave',
+    icon: 'document-text-outline',
+    route: '/accounts/leaves',
+    gradient: ['#9A3412', '#FB923C'],
+    category: 'People',
+  },
+  {
+    title: 'Updates',
+    icon: 'notifications-circle-outline',
+    route: '/accounts/updates',
+    gradient: ['#4F46E5', '#6366F1'],
+    category: 'Workspace',
   },
 ];
 
@@ -259,10 +333,19 @@ export default function AccountsWebSidebar({
 
   const grouped = useMemo(() => {
     const workspace = items.filter((i) =>
-      ['/accounts/dashboard', '/accounts/fees', '/accounts/invoices', '/accounts/certificate-generator'].includes(i.route),
+      [
+        '/accounts/dashboard',
+        '/accounts/fees',
+        '/accounts/invoices',
+        '/accounts/marks',
+        '/accounts/exams',
+        '/accounts/omr-answer-key',
+        '/accounts/omr-print',
+        '/accounts/certificate-generator',
+      ].includes(i.route),
     );
     const people = items.filter((i) =>
-      ['/accounts/manage-users', '/accounts/pending-enrollments'].includes(i.route),
+      ['/accounts/manage-users', '/accounts/pending-enrollments', '/accounts/student-login-qr', '/accounts/role-login-qr'].includes(i.route),
     );
     const system = items.filter((i) => i.route === '/accounts/settings');
     return [

@@ -8,7 +8,7 @@
       "ios",
       "web"
     ],
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/images/icon-v2.png",
     "scheme": "testapp",
     "userInterfaceStyle": "light",
@@ -23,7 +23,8 @@
         "ITSAppUsesNonExemptEncryption": false,
         "UIBackgroundModes": [
           "fetch",
-          "remote-notification"
+          "remote-notification",
+          "location"
         ]
       },
       "entitlements": {
@@ -35,12 +36,14 @@
       "jsEngine": "hermes",
       "versionCode": 1,
       "googleServicesFile": "./google-services.json",
-      "enableShrinkResources": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/icon.png",
         "backgroundColor": "#E6F4FE",
         "monochromeImage": "./assets/images/icon.png"
       },
+      "blockedPermissions": [
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
       "permissions": [
         "INTERNET",
         "ACCESS_NETWORK_STATE",
@@ -71,7 +74,7 @@
       [
         "expo-local-authentication",
         {
-          "faceIDPermission": "Allow $(PRODUCT_NAME) to unlock your staff account with biometrics."
+          "faceIDPermission": "Allow $(PRODUCT_NAME) to verify staff attendance with Face ID."
         }
       ],
       [
@@ -84,7 +87,10 @@
             "./assets/sounds/notification_default.wav",
             "./assets/sounds/emergency.wav",
             "./assets/sounds/fee_reminder.wav",
-            "./assets/sounds/voice_alert.wav"
+            "./assets/sounds/voice_alert.wav",
+            "./assets/sounds/diary_alert.wav",
+            "./assets/sounds/bus_present.wav",
+            "./assets/sounds/busconfirmation.wav"
           ]
         }
       ],
@@ -93,13 +99,31 @@
       "@react-native-community/datetimepicker",
       "./plugins/withManifestMerger.js",
       "./plugins/withAndroidSounds.js",
+      "./plugins/withAndroidWindowCompatibility.js",
+      "./plugins/withAndroidReleaseOptimization.js",
+      "./plugins/withAndroidForegroundAudioOnly.js",
       [
         "expo-build-properties",
         {
+          "android": {
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "extraProguardRules": "# Expo Record options (including SecureStore) use this annotation at runtime.\n# Backport of expo/expo#51206 for Expo Modules Core 3.0.30.\n-keep @interface expo.modules.kotlin.records.Field { *; }"
+          },
           "ios": {
             "useFrameworks": "static",
             "deploymentTarget": "15.1"
           }
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow this driver device to share bus location during an active trip, including while the app is in the background.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true,
+          "locationWhenInUsePermission": "Allow $(PRODUCT_NAME) to verify staff presence on campus for attendance and share school bus location during active trips."
         }
       ]
     ],

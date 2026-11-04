@@ -10,10 +10,15 @@ import { schoolColorWithAlpha } from '../constants/schoolConfig';
 
 interface ClayIconButtonProps {
     onPress: () => void;
+    accessibilityLabel?: string;
     /** Renders a dark, deep-set puck (for dark surfaces/themes) instead of a pearl-light one. */
     isDark: boolean;
     /** Brand tint driving the colored shadow — keeps the glow on-brand instead of generic gray/black. */
     accent: string;
+    /** Overrides the puck fill. Defaults to the shared clay surface. */
+    fill?: string;
+    /** Overrides the web gradient. Defaults to the shared clay gradient. */
+    webGradient?: string;
     /** Circular avatar-style puck vs. rounded-square squircle. */
     round?: boolean;
     size?: number;
@@ -23,8 +28,11 @@ interface ClayIconButtonProps {
 
 export default function ClayIconButton({
     onPress,
+    accessibilityLabel,
     isDark,
     accent,
+    fill,
+    webGradient,
     round = false,
     size = 42,
     style,
@@ -52,6 +60,8 @@ export default function ClayIconButton({
     return (
         <Pressable
             onPress={onPress}
+            accessibilityRole="button"
+            accessibilityLabel={accessibilityLabel}
             hitSlop={6}
             style={({ pressed }) => [
                 {
@@ -60,12 +70,12 @@ export default function ClayIconButton({
                     borderRadius: radius,
                     alignItems: 'center',
                     justifyContent: 'center',
-                    backgroundColor: isDark ? '#1E1830' : '#FFFFFF',
+                    backgroundColor: fill ?? (isDark ? '#1E1830' : '#FFFFFF'),
                 },
                 Platform.OS === 'web'
                     ? ({
                         cursor: 'pointer',
-                        backgroundImage: gradient,
+                        backgroundImage: webGradient ?? gradient,
                         boxShadow: pressed ? pressedShadow : restShadow,
                         transform: pressed ? [{ translateY: 1 }, { scale: 0.97 }] : [{ translateY: 0 }, { scale: 1 }],
                         transitionProperty: 'box-shadow, transform',

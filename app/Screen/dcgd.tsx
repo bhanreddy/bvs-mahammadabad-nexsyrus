@@ -1,3 +1,4 @@
+import { TourTarget, TourScrollView } from '@/src/features/app-tour';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
@@ -220,9 +221,9 @@ const DCGDScreen = () => {
 
   return (
     <ScreenLayout>
-      <StudentHeader showBackButton title="Career Growth & Development" />
+      <TourTarget id="screen.screen-dcgd.overview"><StudentHeader showBackButton title="Career Growth & Development" /></TourTarget>
 
-      <ScrollView
+      <TourTarget id="screen.screen-dcgd.workspace" native><TourScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={[styles.scrollContent, { paddingHorizontal: padH, paddingBottom: 56 }]}
       >
@@ -408,13 +409,13 @@ const DCGDScreen = () => {
             <View style={styles.footerContent}>
               <Ionicons name="shield-checkmark-outline" size={13} color={isDark ? '#475569' : '#CBD5E1'} />
               <Text style={[styles.footerNote, { color: isDark ? '#475569' : '#CBD5E1' }]}>
-                Content managed by Nexsyrus Pvt. Ltd. &amp; your school's Super Admin console.
+                Content managed by Nexsyrus Pvt. Ltd. &amp; your school&apos;s Super Admin console.
               </Text>
             </View>
           </Animated.View>
 
         </View>
-      </ScrollView>
+      </TourScrollView></TourTarget>
     </ScreenLayout>
   );
 };

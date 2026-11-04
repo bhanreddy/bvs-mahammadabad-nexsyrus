@@ -1,4 +1,6 @@
+import { TourTarget } from '@/src/features/app-tour';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { usePathname, useRouter } from 'expo-router';
 import {
   View,
   Text,
@@ -15,6 +17,7 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -22,6 +25,11 @@ import Animated, { FadeInDown, FadeIn } from 'react-native-reanimated';
 import { useTranslation } from 'react-i18next';
 import { alertCompat } from '../../src/utils/crossPlatformAlert';
 import AdminHeader from '../../src/components/AdminHeader';
+import { ExamMarksReadinessCard } from '../../src/components/admin/ExamMarksReadinessCard';
+import { SpecialExamSubjectsCard } from '../../src/components/admin/SpecialExamSubjectsCard';
+import { SpecialSubjectSpec } from '../../src/utils/specialExamSubjects';
+import { ExamMissingMarksModal } from '../../src/components/admin/ExamMissingMarksModal';
+import { useAccountsWebChrome } from '../../src/contexts/AccountsWebChromeContext';
 import AppTextInput from '../../src/components/AppTextInput';
 import AppDatePicker from '../../src/components/AppDatePicker';
 import LogoLoader from '../../src/components/LogoLoader';
@@ -47,6 +55,8 @@ import {
   ExamRoomAllocation,
   ExamAllocationParams,
   ExamSeatStudent,
+  ExamResultReadinessPaper,
+  ExamResultReadinessSection,
   SeatingStrategy,
 } from '../../src/services/examService';
 import { TimetableService, TimetableTeacher } from '../../src/services/timetableService';
@@ -55,6 +65,17 @@ import {
   type HallTicketsPerPage,
 } from '../../src/utils/hallTicketPdf';
 import { SCHOOL_CONFIG } from '../../src/constants/schoolConfig';
+import {
+  HallTicketService,
+  type HallTicketPreview,
+} from '../../src/services/hallTicketService';
+import {
+  HALL_TICKET_CLEARANCE_PRESETS,
+  parseHallTicketPercent,
+  presetForRange,
+  validateHallTicketRange,
+  type HallTicketClearancePreset,
+} from '../../src/utils/hallTicketEligibility';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -289,6 +310,10 @@ function groupPapersByDate(papers: ExamPaper[]): DateGroup[] {
 
 export default function AdminExams() {
   useTranslation();
+  const router = useRouter();
+  const pathname = usePathname();
+  const { shellActive, openMobileNav } = useAccountsWebChrome();
+  const inAccounts = (pathname || '').startsWith('/accounts');
   const { theme, isDark } = useTheme();
   const styles = useMemo(() => getStyles(theme, isDark), [theme, isDark]);
 
@@ -299,6 +324,8 @@ export default function AdminExams() {
   // list view
   const [exams, setExams] = useState<ExamListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [publishingExamId, setPublishingExamId] = useState<string | null>(null);
+  const [exportingMissingMarks, setExportingMissingMarks] = useState(false);
   const [hallTicketExam, setHallTicketExam] = useState<ExamListItem | null>(null);
   const [signatureVisible, setSignatureVisible] = useState(false);
 
@@ -436,10 +463,14 @@ export default function AdminExams() {
     if (!detail) return;
     const publishing = !detail.exam.results_published;
     const readiness = detail.result_readiness;
-    if (publishing && !readiness.ready) {
+    const publishable = readiness.publishable ?? readiness.entered_entries > 0;
+    if (publishing && !publishable) {
+      const message = readiness.papers_total === 0
+        ? 'Teachers can enter marks for this exam from Results without creating or publishing a timetable. Publishing becomes available as soon as the first mark is saved.'
+        : 'Enter at least one student mark before publishing results.';
       alertCompat(
-        'Marks are still incomplete',
-        `${readiness.missing_entries} mark ${readiness.missing_entries === 1 ? 'entry is' : 'entries are'} still missing. Results can be published after every teacher finishes entry.`
+        readiness.papers_total === 0 ? 'Results are ready for mark entry' : 'Marks are still incomplete',
+        message
       );
       return;
     }
@@ -463,9 +494,12 @@ export default function AdminExams() {
     };
 
     if (publishing) {
+      const partialWarning = readiness.missing_entries > 0
+        ? ` ${readiness.missing_entries} entries are still missing; each student will see only the subjects already entered.`
+        : '';
       alertCompat(
         'Publish results?',
-        `All ${readiness.entered_entries} mark entries are complete. Parents and students will be notified and can see the results immediately.`,
+        `${readiness.entered_entries} mark entries will be published.${partialWarning} Parents and students with saved marks will be notified immediately.`,
         [
           { text: 'Cancel', style: 'cancel' },
           { text: 'Publish results', onPress: doIt },
@@ -482,6 +516,77 @@ export default function AdminExams() {
       );
     }
   }, [detail, refreshDetail]);
+
+  const handleExportMissingMarks = useCallback(async () => {
+    if (!detail || detail.result_readiness.missing_entries === 0) return;
+    try {
+      setExportingMissingMarks(true);
+      await ExamTimetableService.exportMissingMarks(detail.exam.id, detail.exam.name);
+    } catch (err: any) {
+      alertCompat('Download failed', err?.message || 'Could not create the unuploaded marks workbook.');
+    } finally {
+      setExportingMissingMarks(false);
+    }
+  }, [detail]);
+
+  const handleListResultAction = useCallback((exam: ExamListItem) => {
+    const readiness = exam.result_readiness;
+
+    if (exam.results_published) {
+      void openDetail(exam.id);
+      return;
+    }
+    if (!readiness) {
+      void openDetail(exam.id);
+      return;
+    }
+    if (readiness.papers_total === 0) {
+      alertCompat(
+        'Results do not need a timetable',
+        'Teachers can select this exam in Staff → Results and enter marks immediately. Once the first mark is saved, you can publish here—even if the timetable was never generated or published.'
+      );
+      return;
+    }
+    const publishable = readiness.publishable ?? readiness.entered_entries > 0;
+    if (!publishable) {
+      void openDetail(exam.id);
+      return;
+    }
+
+    const publish = async () => {
+      try {
+        setPublishingExamId(exam.id);
+        await ExamTimetableService.setResultsPublished(exam.id, true);
+        setExams((current) => current.map((item) => (
+          item.id === exam.id
+            ? { ...item, results_published: true, results_published_at: new Date().toISOString() }
+            : item
+        )));
+        alertCompat(
+          'Results published',
+          `${t_field(exam.name, exam.name_te)} is now visible to students and parents.`
+        );
+      } catch (err: any) {
+        // Marks may have changed since the list was loaded. Refresh so the
+        // readiness message always reflects the server's final safety check.
+        await loadExams();
+        alertCompat('Could not publish results', err?.message || 'Please review the marks and try again.');
+      } finally {
+        setPublishingExamId(null);
+      }
+    };
+
+    alertCompat(
+      readiness.ready ? 'Publish exam results?' : 'Publish partial results?',
+      readiness.ready
+        ? `All ${readiness.entered_entries} mark entries are complete. Students and parents will be notified and can view the results immediately.`
+        : `${readiness.entered_entries} marks are ready and ${readiness.missing_entries} are still missing. Students will see only their entered subjects, and affected families will be notified.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Publish results', onPress: () => { void publish(); } },
+      ]
+    );
+  }, [loadExams, openDetail]);
 
   const handleDeleteExam = useCallback(() => {
     if (!detail || saving) return;
@@ -525,9 +630,15 @@ export default function AdminExams() {
   // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <View style={styles.container}>
+    <TourTarget id="screen.admin-exams.overview" native><TourTarget id="screen.admin-exams.workspace" native><View style={styles.container}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
-      <AdminHeader title={selectedExamId ? 'Exam Timetable' : 'Exams'} showBackButton />
+      {!shellActive && (
+        <AdminHeader
+          title={selectedExamId ? 'Exam Timetable' : 'Exams'}
+          showBackButton
+          onMenuPress={inAccounts ? openMobileNav : undefined}
+        />
+      )}
 
       {selectedExamId ? (
         detailLoading || !detail ? (
@@ -539,17 +650,39 @@ export default function AdminExams() {
             detail={detail}
             allocations={allocations}
             saving={saving}
+            exportingMissingMarks={exportingMissingMarks}
             onBack={closeDetail}
             onGenerate={() => setGenVisible(true)}
             onEditPaper={setEditPaper}
             onPublishToggle={handlePublishToggle}
             onResultPublishToggle={handleResultPublishToggle}
+            onExportMissingMarks={handleExportMissingMarks}
+            onAssignTeacher={
+              inAccounts
+                ? undefined
+                : (paper, section) => {
+                    router.push({
+                      pathname: '/admin/timetable',
+                      params: {
+                        classId: paper.class_id,
+                        sectionId: section.section_id,
+                        subjectId: paper.subject_id,
+                        academicYearId: detail.exam.academic_year_id,
+                        focusAssignment: '1',
+                        focusToken: Date.now().toString(),
+                      },
+                    });
+                  }
+            }
             onQuickAllocate={handleQuickAllocate}
             onCustomizeAllocate={() => setAllocVisible(true)}
             onManageRooms={() => setRoomsVisible(true)}
             onOpenRoom={setRoomDetail}
             onAddRoomToSitting={setAddRoomSitting}
             onHallTickets={() => setHallTicketExam(detail.exam)}
+            onSpecialSubjectsSaved={() => {
+              if (selectedExamId) void openDetail(selectedExamId);
+            }}
             onDeleteExam={handleDeleteExam}
           />
         )
@@ -562,6 +695,8 @@ export default function AdminExams() {
           exams={exams}
           onOpen={openDetail}
           onHallTickets={setHallTicketExam}
+          onResultAction={handleListResultAction}
+          publishingExamId={publishingExamId}
           onCreate={() => setCreateVisible(true)}
           onManageSignature={() => setSignatureVisible(true)}
         />
@@ -743,20 +878,22 @@ export default function AdminExams() {
           }}
         />
       )}
-    </View>
+    </View></TourTarget></TourTarget>
   );
 }
 
 // ─── List view ────────────────────────────────────────────────────────────────
 
-type ExamFilter = 'all' | 'live' | 'draft' | 'setup';
+type ExamFilter = 'all' | 'ready' | 'results_live' | 'live' | 'draft' | 'setup';
 
 function examNeedsSetup(exam: ExamListItem): boolean {
-  return !exam.timetable_published && (exam.papers_count || 0) === 0;
+  const scheduledPapers = exam.scheduled_papers_count ?? exam.papers_count ?? 0;
+  return !exam.timetable_published && scheduledPapers === 0;
 }
 
 function examIsDraft(exam: ExamListItem): boolean {
-  return !exam.timetable_published && (exam.papers_count || 0) > 0;
+  const scheduledPapers = exam.scheduled_papers_count ?? exam.papers_count ?? 0;
+  return !exam.timetable_published && scheduledPapers > 0;
 }
 
 const ExamCard = React.memo(function ExamCard({
@@ -765,82 +902,192 @@ const ExamCard = React.memo(function ExamCard({
   theme,
   onPress,
   onHallTickets,
+  onResultAction,
+  publishing,
 }: {
   exam: ExamListItem;
   styles: Styles;
   theme: Theme;
   onPress: (id: string) => void;
   onHallTickets: (exam: ExamListItem) => void;
+  onResultAction: (exam: ExamListItem) => void;
+  publishing: boolean;
 }) {
   const category = examCategoryFor(exam.exam_type);
   const gradient = categoryGradient(exam.exam_type, category.color);
   const live = !!exam.timetable_published;
-  const hasPapers = (exam.papers_count || 0) > 0;
+  const scheduledPaperCount = exam.scheduled_papers_count ?? exam.papers_count ?? 0;
+  const hasScheduledPapers = scheduledPaperCount > 0;
+  const resultsPublished = !!exam.results_published;
+  const readiness = exam.result_readiness;
+  const resultSubjectCount = readiness?.papers_total ?? exam.papers_count ?? 0;
+  const hasResultSubjects = resultSubjectCount > 0;
+  const resultsReady = !!readiness?.ready && !resultsPublished;
+  const resultsPublishable = !resultsPublished && (readiness?.publishable ?? (readiness?.entered_entries || 0) > 0);
+  const hasMarkProgress = (readiness?.expected_entries || 0) > 0;
+  const completion = hasMarkProgress
+    ? Math.min(100, Math.round(((readiness?.entered_entries || 0) / (readiness?.expected_entries || 1)) * 100))
+    : 0;
   const nextHint = live
     ? null
-    : !hasPapers
-      ? 'Generate timetable'
-      : 'Finish & publish';
+    : !hasScheduledPapers
+      ? 'Not set · optional for results'
+      : 'Ready to publish';
+
+  const resultTitle = resultsPublished
+    ? 'Results published'
+    : resultsReady
+      ? 'Results ready to publish'
+      : resultsPublishable
+        ? 'Partial results available'
+      : hasMarkProgress
+        ? 'Marks entry in progress'
+        : hasResultSubjects
+          ? 'Waiting for marks'
+          : 'Results not started';
+  const resultSubtitle = resultsPublished
+    ? 'Visible to students and parents'
+    : resultsReady
+      ? `All ${readiness?.entered_entries || 0} entries complete`
+      : resultsPublishable
+        ? `${readiness?.entered_entries || 0} entered · ${readiness?.missing_entries || 0} still missing`
+      : hasMarkProgress
+        ? `${readiness?.entered_entries || 0} of ${readiness?.expected_entries || 0} entered · ${readiness?.missing_entries || 0} remaining`
+        : hasResultSubjects
+          ? 'Teachers can continue entering marks'
+          : 'Marks can be entered without a timetable';
+  const resultColor = resultsPublished
+    ? theme.colors.success
+    : resultsPublishable
+      ? theme.colors.primary
+      : hasMarkProgress
+        ? theme.colors.warning
+        : theme.colors.textTertiary;
+  const resultIcon = resultsPublished
+    ? 'checkmark-circle'
+    : resultsPublishable
+      ? 'megaphone-outline'
+      : hasMarkProgress
+        ? 'time-outline'
+        : 'school-outline';
+  const resultActionLabel = publishing
+    ? 'Publishing…'
+    : resultsPublishable
+      ? 'Publish results'
+      : resultsPublished
+        ? 'View'
+        : hasResultSubjects
+          ? 'Review'
+          : 'Results';
 
   return (
-    <TouchableOpacity style={styles.examCard} activeOpacity={0.72} onPress={() => onPress(exam.id)}>
-      <LinearGradient
-        colors={gradient}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.examCardIconGradient}
-      >
-        <Ionicons name={category.icon} size={20} color="#FFFFFF" />
-      </LinearGradient>
-      <View style={styles.examCardBody}>
-        <View style={styles.examCardTitleRow}>
-          <Text style={styles.examCardTitle} numberOfLines={1}>
-            {t_field(exam.name, exam.name_te)}
+    <View style={styles.examCard}>
+      <View style={styles.examCardTopRow}>
+        <TouchableOpacity
+          style={styles.examCardOpen}
+          activeOpacity={0.72}
+          onPress={() => onPress(exam.id)}
+          accessibilityRole="button"
+          accessibilityLabel={`Open ${exam.name}`}
+        >
+          <LinearGradient
+            colors={gradient}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.examCardIconGradient}
+          >
+            <Ionicons name={category.icon} size={20} color="#FFFFFF" />
+          </LinearGradient>
+          <View style={styles.examCardBody}>
+            <View style={styles.examCardTitleRow}>
+              <Text style={styles.examCardTitle} numberOfLines={1}>
+                {t_field(exam.name, exam.name_te)}
+              </Text>
+              {live ? (
+                <View style={[styles.statusPill, { backgroundColor: `${theme.colors.success}14` }]}>
+                  <View style={[styles.statusDot, { backgroundColor: theme.colors.success }]} />
+                  <Text style={[styles.statusPillText, { color: theme.colors.success }]}>Schedule live</Text>
+                </View>
+              ) : hasScheduledPapers ? (
+                <View style={[styles.statusPill, { backgroundColor: `${theme.colors.warning}16` }]}>
+                  <View style={[styles.statusDot, { backgroundColor: theme.colors.warning }]} />
+                  <Text style={[styles.statusPillText, { color: theme.colors.warning }]}>Draft</Text>
+                </View>
+              ) : (
+                <View style={[styles.statusPill, { backgroundColor: theme.colors.borderLight }]}>
+                  <Text style={[styles.statusPillText, { color: theme.colors.textTertiary }]}>No schedule</Text>
+                </View>
+              )}
+            </View>
+            <Text style={styles.examCardSub} numberOfLines={1}>
+              {category.title}
+              {` · ${fmtDateRange(exam.start_date, exam.end_date)}`}
+              {hasScheduledPapers ? ` · ${pluralCount(scheduledPaperCount, 'scheduled paper')}` : ''}
+            </Text>
+            {nextHint && (
+              <Text style={styles.examCardHint} numberOfLines={1}>
+                Schedule: {nextHint}
+              </Text>
+            )}
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={theme.colors.textTertiary} />
+        </TouchableOpacity>
+        {live && hasScheduledPapers && (
+          <TouchableOpacity
+            style={styles.hallTicketIconBtn}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={`Download hall tickets for ${exam.name}`}
+            onPress={() => onHallTickets(exam)}
+          >
+            <Ionicons name="download-outline" size={18} color={theme.colors.primary} />
+          </TouchableOpacity>
+        )}
+      </View>
+
+      <View style={styles.resultQuickRow}>
+        <View style={[styles.resultQuickIcon, { backgroundColor: `${resultColor}14` }]}>
+          <Ionicons name={resultIcon as any} size={18} color={resultColor} />
+        </View>
+        <View style={styles.resultQuickBody}>
+          <Text style={[styles.resultQuickTitle, { color: resultColor }]} numberOfLines={1}>
+            {resultTitle}
           </Text>
-          {live ? (
-            <View style={[styles.statusPill, { backgroundColor: `${theme.colors.success}14` }]}>
-              <View style={[styles.statusDot, { backgroundColor: theme.colors.success }]} />
-              <Text style={[styles.statusPillText, { color: theme.colors.success }]}>Live</Text>
-            </View>
-          ) : hasPapers ? (
-            <View style={[styles.statusPill, { backgroundColor: `${theme.colors.warning}16` }]}>
-              <View style={[styles.statusDot, { backgroundColor: theme.colors.warning }]} />
-              <Text style={[styles.statusPillText, { color: theme.colors.warning }]}>Draft</Text>
-            </View>
-          ) : (
-            <View style={[styles.statusPill, { backgroundColor: theme.colors.borderLight }]}>
-              <Text style={[styles.statusPillText, { color: theme.colors.textTertiary }]}>Setup</Text>
+          <Text style={styles.resultQuickSub} numberOfLines={1}>{resultSubtitle}</Text>
+          {!resultsPublished && hasMarkProgress && (
+            <View style={styles.resultProgressTrack}>
+              <View
+                style={[
+                  styles.resultProgressFill,
+                  { width: `${completion}%`, backgroundColor: resultsReady ? theme.colors.success : theme.colors.warning },
+                ]}
+              />
             </View>
           )}
         </View>
-        <Text style={styles.examCardSub} numberOfLines={1}>
-          {category.title}
-          {` · ${fmtDateRange(exam.start_date, exam.end_date)}`}
-          {hasPapers ? ` · ${pluralCount(exam.papers_count || 0, 'paper')}` : ''}
-        </Text>
-        {nextHint && (
-          <Text style={styles.examCardHint} numberOfLines={1}>
-            Next: {nextHint}
-          </Text>
-        )}
-      </View>
-      {live && hasPapers && (
         <TouchableOpacity
-          style={styles.hallTicketIconBtn}
-          activeOpacity={0.7}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={[
+            styles.resultQuickAction,
+            resultsPublishable && styles.resultQuickActionPrimary,
+            publishing && styles.disabledBtn,
+          ]}
+          activeOpacity={0.78}
+          disabled={publishing}
+          onPress={() => onResultAction(exam)}
           accessibilityRole="button"
-          accessibilityLabel={`Download hall tickets for ${exam.name}`}
-          onPress={(e) => {
-            (e as any)?.stopPropagation?.();
-            onHallTickets(exam);
-          }}
+          accessibilityLabel={`${resultActionLabel} for ${exam.name}`}
         >
-          <Ionicons name="download-outline" size={18} color={theme.colors.primary} />
+          {publishing ? (
+            <ActivityIndicator size="small" color="#FFFFFF" />
+          ) : resultsPublishable ? (
+            <Ionicons name="megaphone-outline" size={14} color="#FFFFFF" />
+          ) : null}
+          <Text style={[styles.resultQuickActionText, resultsPublishable && styles.resultQuickActionTextPrimary]}>
+            {resultActionLabel}
+          </Text>
         </TouchableOpacity>
-      )}
-      <Ionicons name="chevron-forward" size={16} color={theme.colors.textTertiary} />
-    </TouchableOpacity>
+      </View>
+    </View>
   );
 });
 
@@ -850,6 +1097,8 @@ function ExamListView({
   exams,
   onOpen,
   onHallTickets,
+  onResultAction,
+  publishingExamId,
   onCreate,
   onManageSignature,
 }: {
@@ -858,6 +1107,8 @@ function ExamListView({
   exams: ExamListItem[];
   onOpen: (id: string) => void;
   onHallTickets: (exam: ExamListItem) => void;
+  onResultAction: (exam: ExamListItem) => void;
+  publishingExamId: string | null;
   onCreate: () => void;
   onManageSignature: () => void;
 }) {
@@ -867,6 +1118,8 @@ function ExamListView({
     () => ({
       all: exams.length,
       live: exams.filter((e) => e.timetable_published).length,
+      ready: exams.filter((e) => e.result_readiness?.ready && !e.results_published).length,
+      results_live: exams.filter((e) => e.results_published).length,
       draft: exams.filter(examIsDraft).length,
       setup: exams.filter(examNeedsSetup).length,
     }),
@@ -874,6 +1127,8 @@ function ExamListView({
   );
 
   const filtered = useMemo(() => {
+    if (filter === 'ready') return exams.filter((e) => e.result_readiness?.ready && !e.results_published);
+    if (filter === 'results_live') return exams.filter((e) => e.results_published);
     if (filter === 'live') return exams.filter((e) => e.timetable_published);
     if (filter === 'draft') return exams.filter(examIsDraft);
     if (filter === 'setup') return exams.filter(examNeedsSetup);
@@ -882,9 +1137,11 @@ function ExamListView({
 
   const filters: { key: ExamFilter; label: string; count: number }[] = [
     { key: 'all', label: 'All', count: counts.all },
-    { key: 'live', label: 'Live', count: counts.live },
+    { key: 'ready', label: 'Results ready', count: counts.ready },
+    { key: 'results_live', label: 'Results published', count: counts.results_live },
+    { key: 'live', label: 'Schedule live', count: counts.live },
     { key: 'draft', label: 'Drafts', count: counts.draft },
-    { key: 'setup', label: 'Setup', count: counts.setup },
+    { key: 'setup', label: 'No schedule', count: counts.setup },
   ];
 
   const renderItem = useCallback(
@@ -896,10 +1153,12 @@ function ExamListView({
           theme={theme}
           onPress={onOpen}
           onHallTickets={onHallTickets}
+          onResultAction={onResultAction}
+          publishing={publishingExamId === item.id}
         />
       </Animated.View>
     ),
-    [styles, theme, onOpen, onHallTickets]
+    [styles, theme, onOpen, onHallTickets, onResultAction, publishingExamId]
   );
 
   return (
@@ -916,7 +1175,9 @@ function ExamListView({
                 <View>
                   <Text style={styles.listHeaderTitle}>Exams</Text>
                   <Text style={styles.listHeaderSub}>
-                    {counts.live} live · {counts.draft} draft · {counts.setup} to set up
+                    {counts.ready > 0
+                      ? `${pluralCount(counts.ready, 'result')} ready to publish · ${counts.results_live} published`
+                      : `${counts.live} schedules live · ${counts.results_live} results published`}
                   </Text>
                 </View>
                 <View style={styles.headerActions}>
@@ -1232,8 +1493,19 @@ function HallTicketModal({
   const [classId, setClassId] = useState('');
   const [sectionId, setSectionId] = useState('');
   const [ticketsPerPage, setTicketsPerPage] = useState<HallTicketsPerPage>(4);
+  const [showRollNumbers, setShowRollNumbers] = useState(false);
+  const [minClearance, setMinClearance] = useState('0');
+  const [maxClearance, setMaxClearance] = useState('100');
+  const [excludePreviouslyDownloaded, setExcludePreviouslyDownloaded] = useState(true);
+  const [preview, setPreview] = useState<HallTicketPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [showStudentPreview, setShowStudentPreview] = useState(false);
+  const [previewRevision, setPreviewRevision] = useState(0);
+  const [pendingTrackingBatchId, setPendingTrackingBatchId] = useState<string | null>(null);
   const [loadingOptions, setLoadingOptions] = useState(true);
   const [downloading, setDownloading] = useState(false);
+  const pendingTrackingStorageKey = `hall-ticket-pending-batch:${exam.id}`;
 
   useEffect(() => {
     let active = true;
@@ -1266,6 +1538,18 @@ function HallTicketModal({
       active = false;
     };
   }, [exam.id, onClose]);
+
+  useEffect(() => {
+    let active = true;
+    AsyncStorage.getItem(pendingTrackingStorageKey)
+      .then((batchId) => {
+        if (active && batchId) setPendingTrackingBatchId(batchId);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [pendingTrackingStorageKey]);
 
   const examClassIds = useMemo(
     () => new Set((detail?.papers || []).map((paper) => paper.class_id)),
@@ -1300,6 +1584,90 @@ function HallTicketModal({
   const handleClassPress = (nextClassId: string) => {
     setClassId(nextClassId);
     setSectionId('');
+    setPreview(null);
+  };
+
+  const rangeError = useMemo(
+    () => validateHallTicketRange(minClearance, maxClearance),
+    [maxClearance, minClearance],
+  );
+  const minClearanceValue = parseHallTicketPercent(minClearance);
+  const maxClearanceValue = parseHallTicketPercent(maxClearance);
+  const selectedClearancePreset: HallTicketClearancePreset =
+    minClearanceValue == null || maxClearanceValue == null
+      ? 'custom'
+      : presetForRange(minClearanceValue, maxClearanceValue);
+
+  useEffect(() => {
+    if (!classId || !sectionId || rangeError || minClearanceValue == null || maxClearanceValue == null) {
+      setPreview(null);
+      setPreviewLoading(false);
+      setPreviewError(null);
+      return;
+    }
+    let active = true;
+    const timer = setTimeout(() => {
+      setPreviewLoading(true);
+      setPreviewError(null);
+      HallTicketService.preview(exam.id, {
+        class_id: classId,
+        section_id: sectionId,
+        min_clearance_percent: minClearanceValue,
+        max_clearance_percent: maxClearanceValue,
+        exclude_previously_downloaded: excludePreviouslyDownloaded,
+      })
+        .then((nextPreview) => {
+          if (active) setPreview(nextPreview);
+        })
+        .catch((err: any) => {
+          if (!active) return;
+          setPreview(null);
+          setPreviewError(err?.message || 'Could not calculate hall-ticket eligibility.');
+        })
+        .finally(() => {
+          if (active) setPreviewLoading(false);
+        });
+    }, 350);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [
+    classId,
+    sectionId,
+    minClearanceValue,
+    maxClearanceValue,
+    rangeError,
+    excludePreviouslyDownloaded,
+    exam.id,
+    previewRevision,
+  ]);
+
+  const applyClearancePreset = (presetId: HallTicketClearancePreset) => {
+    const preset = HALL_TICKET_CLEARANCE_PRESETS.find((item) => item.id === presetId);
+    if (!preset?.range) return;
+    setMinClearance(String(preset.range.min));
+    setMaxClearance(String(preset.range.max));
+  };
+
+  const retryTracking = async () => {
+    if (!pendingTrackingBatchId) return;
+    try {
+      setDownloading(true);
+      await HallTicketService.complete(exam.id, pendingTrackingBatchId);
+      await AsyncStorage.removeItem(pendingTrackingStorageKey).catch(() => undefined);
+      setPendingTrackingBatchId(null);
+      setPreviewRevision((value) => value + 1);
+      alertCompat('Download recorded', 'The hall-ticket batch is now included in download history.');
+    } catch (err: any) {
+      if (err?.status === 409) {
+        await AsyncStorage.removeItem(pendingTrackingStorageKey).catch(() => undefined);
+        setPendingTrackingBatchId(null);
+      }
+      alertCompat('Tracking retry failed', err?.message || 'Please try again when the connection is available.');
+    } finally {
+      setDownloading(false);
+    }
   };
 
   const handleDownload = async () => {
@@ -1307,12 +1675,28 @@ function HallTicketModal({
       alertCompat('Select class and section', 'Both filters are required to create the hall-ticket batch.');
       return;
     }
+    if (rangeError || minClearanceValue == null || maxClearanceValue == null) {
+      alertCompat('Check fee range', rangeError || 'Enter a valid fee-clearance range.');
+      return;
+    }
 
+    let preparedBatchId: string | null = null;
+    let pdfCreated = false;
     try {
       setDownloading(true);
-      const data = await ExamTimetableService.getHallTicketData(exam.id, classId, sectionId);
+      const data = await HallTicketService.prepare(exam.id, {
+        class_id: classId,
+        section_id: sectionId,
+        min_clearance_percent: minClearanceValue,
+        max_clearance_percent: maxClearanceValue,
+        exclude_previously_downloaded: excludePreviouslyDownloaded,
+        tickets_per_page: ticketsPerPage,
+        show_roll_numbers: showRollNumbers,
+      });
+      preparedBatchId = data.batch_id;
       if (data.students.length === 0) {
-        alertCompat('No students found', 'There are no active students in this class and section.');
+        await HallTicketService.fail(exam.id, data.batch_id).catch(() => undefined);
+        alertCompat('No eligible students', 'No students match this fee-clearance range.');
         return;
       }
 
@@ -1325,14 +1709,30 @@ function HallTicketModal({
         papers: data.papers,
         school: hallTicketSchoolSettings(school),
         ticketsPerPage,
+        showRollNumbers,
       });
-      if (Platform.OS === 'web') {
+      pdfCreated = true;
+      try {
+        await HallTicketService.complete(exam.id, data.batch_id);
+        await AsyncStorage.removeItem(pendingTrackingStorageKey).catch(() => undefined);
+        setPendingTrackingBatchId(null);
+        setPreviewRevision((value) => value + 1);
         alertCompat(
           'Hall tickets downloaded',
           `${data.students.length} hall ticket${data.students.length === 1 ? '' : 's'} saved as ${fileName}.`,
         );
+      } catch (trackingError: any) {
+        await AsyncStorage.setItem(pendingTrackingStorageKey, data.batch_id).catch(() => undefined);
+        setPendingTrackingBatchId(data.batch_id);
+        alertCompat(
+          'PDF downloaded — tracking pending',
+          `${fileName} was created, but its download history was not saved. Use “Retry tracking” before the next batch. ${trackingError?.message || ''}`.trim(),
+        );
       }
     } catch (err: any) {
+      if (preparedBatchId && !pdfCreated) {
+        await HallTicketService.fail(exam.id, preparedBatchId).catch(() => undefined);
+      }
       alertCompat('Download failed', err?.message || 'Could not generate hall tickets.');
     } finally {
       setDownloading(false);
@@ -1341,6 +1741,16 @@ function HallTicketModal({
   const selectedModel =
     HALL_TICKET_MODELS.find((model) => model.count === ticketsPerPage) ||
     HALL_TICKET_MODELS[0];
+  const readyCount = preview?.eligibility_summary.ready_to_download ?? 0;
+  const cannotDownload =
+    !classId ||
+    !sectionId ||
+    !!rangeError ||
+    previewLoading ||
+    !preview ||
+    readyCount === 0 ||
+    !!pendingTrackingBatchId ||
+    downloading;
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={() => !downloading && onClose()}>
@@ -1414,6 +1824,27 @@ function HallTicketModal({
                 </Text>
               </View>
 
+              <View style={styles.hallTicketOptionRow}>
+                <View style={styles.hallTicketOptionIcon}>
+                  <Ionicons name="list-outline" size={19} color={theme.colors.primary} />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={styles.hallTicketOptionTitle}>Show roll number</Text>
+                  <Text style={styles.hallTicketOptionText}>
+                    {showRollNumbers
+                      ? 'Each hall ticket will print the student’s saved roll number.'
+                      : 'Each hall ticket keeps an empty Roll No. box.'}
+                  </Text>
+                </View>
+                <Switch
+                  value={showRollNumbers}
+                  onValueChange={setShowRollNumbers}
+                  trackColor={{ false: theme.colors.border, true: `${theme.colors.primary}66` }}
+                  thumbColor={showRollNumbers ? theme.colors.primary : theme.colors.textTertiary}
+                  accessibilityLabel="Show roll numbers on hall tickets"
+                />
+              </View>
+
               <Text style={styles.fieldLabel}>Class</Text>
               <View style={styles.chipWrap}>
                 {classOptions.map((item) => {
@@ -1457,20 +1888,224 @@ function HallTicketModal({
                 </View>
               )}
 
+              <View style={styles.hallTicketSectionHeader}>
+                <View style={styles.hallTicketSectionIcon}>
+                  <Ionicons name="wallet-outline" size={18} color={theme.colors.primary} />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={styles.hallTicketSectionTitle}>Fee eligibility</Text>
+                  <Text style={styles.hallTicketSectionText}>
+                    School fees for this exam’s academic year. Transport fees are not included.
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.chipWrap}>
+                {HALL_TICKET_CLEARANCE_PRESETS.map((preset) => {
+                  const active = selectedClearancePreset === preset.id;
+                  return (
+                    <TouchableOpacity
+                      key={preset.id}
+                      style={[styles.chip, active && styles.chipActive]}
+                      activeOpacity={0.72}
+                      onPress={() => applyClearancePreset(preset.id)}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: active }}
+                    >
+                      <Text style={[styles.chipText, active && styles.chipTextActive]}>{preset.label}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <View style={styles.hallTicketRangeRow}>
+                <View style={styles.hallTicketRangeField}>
+                  <Text style={styles.inputSubLabel}>Minimum cleared %</Text>
+                  <AppTextInput
+                    value={minClearance}
+                    onChangeText={setMinClearance}
+                    placeholder="0"
+                    keyboardType="decimal-pad"
+                    style={styles.input}
+                    accessibilityLabel="Minimum fee clearance percentage"
+                  />
+                </View>
+                <Text style={styles.hallTicketRangeDivider}>to</Text>
+                <View style={styles.hallTicketRangeField}>
+                  <Text style={styles.inputSubLabel}>Maximum cleared %</Text>
+                  <AppTextInput
+                    value={maxClearance}
+                    onChangeText={setMaxClearance}
+                    placeholder="100"
+                    keyboardType="decimal-pad"
+                    style={styles.input}
+                    accessibilityLabel="Maximum fee clearance percentage"
+                  />
+                </View>
+              </View>
+              {!!rangeError && <Text style={styles.hallTicketValidationText}>{rangeError}</Text>}
+
+              <View style={styles.hallTicketOptionRow}>
+                <View style={styles.hallTicketOptionIcon}>
+                  <Ionicons name="copy-outline" size={19} color={theme.colors.primary} />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={styles.hallTicketOptionTitle}>Exclude previously issued</Text>
+                  <Text style={styles.hallTicketOptionText}>
+                    {excludePreviouslyDownloaded
+                      ? 'Students already downloaded for this exam will be skipped.'
+                      : 'Previously issued students can be included as intentional reprints.'}
+                  </Text>
+                </View>
+                <Switch
+                  value={excludePreviouslyDownloaded}
+                  onValueChange={setExcludePreviouslyDownloaded}
+                  trackColor={{ false: theme.colors.border, true: `${theme.colors.primary}66` }}
+                  thumbColor={excludePreviouslyDownloaded ? theme.colors.primary : theme.colors.textTertiary}
+                  accessibilityLabel="Exclude previously issued hall tickets"
+                />
+              </View>
+
+              {!!pendingTrackingBatchId && (
+                <TouchableOpacity
+                  style={styles.hallTicketTrackingWarning}
+                  onPress={retryTracking}
+                  disabled={downloading}
+                  activeOpacity={0.75}
+                >
+                  <Ionicons name="cloud-offline-outline" size={18} color={theme.colors.warning} />
+                  <View style={styles.flex}>
+                    <Text style={styles.hallTicketTrackingTitle}>Download history is pending</Text>
+                    <Text style={styles.hallTicketTrackingText}>Tap to retry tracking the last PDF batch.</Text>
+                  </View>
+                  <Ionicons name="refresh" size={18} color={theme.colors.warning} />
+                </TouchableOpacity>
+              )}
+
+              {previewLoading ? (
+                <View style={styles.hallTicketPreviewLoading}>
+                  <ActivityIndicator size="small" color={theme.colors.primary} />
+                  <Text style={styles.helperText}>Calculating fee eligibility…</Text>
+                </View>
+              ) : previewError ? (
+                <View style={styles.hallTicketPreviewError}>
+                  <Ionicons name="alert-circle-outline" size={18} color={theme.colors.danger} />
+                  <Text style={styles.hallTicketPreviewErrorText}>{previewError}</Text>
+                </View>
+              ) : preview ? (
+                <View style={styles.hallTicketEligibilityCard}>
+                  <View style={styles.hallTicketEligibilityTop}>
+                    <View>
+                      <Text style={styles.hallTicketEligibilityEyebrow}>READY TO DOWNLOAD</Text>
+                      <Text style={styles.hallTicketEligibilityCount}>{readyCount}</Text>
+                    </View>
+                    <Ionicons name="shield-checkmark-outline" size={29} color={theme.colors.primary} />
+                  </View>
+                  <View style={styles.hallTicketStatsGrid}>
+                    <View style={styles.hallTicketStat}>
+                      <Text style={styles.hallTicketStatValue}>{preview.eligibility_summary.total_active_students}</Text>
+                      <Text style={styles.hallTicketStatLabel}>Active</Text>
+                    </View>
+                    <View style={styles.hallTicketStat}>
+                      <Text style={styles.hallTicketStatValue}>{preview.eligibility_summary.within_fee_range}</Text>
+                      <Text style={styles.hallTicketStatLabel}>In range</Text>
+                    </View>
+                    <View style={styles.hallTicketStat}>
+                      <Text style={styles.hallTicketStatValue}>{preview.eligibility_summary.previously_downloaded}</Text>
+                      <Text style={styles.hallTicketStatLabel}>Issued</Text>
+                    </View>
+                    <View style={styles.hallTicketStat}>
+                      <Text style={styles.hallTicketStatValue}>{preview.eligibility_summary.temporarily_reserved}</Text>
+                      <Text style={styles.hallTicketStatLabel}>Reserved</Text>
+                    </View>
+                  </View>
+
+                  <TouchableOpacity
+                    style={styles.hallTicketPreviewToggle}
+                    onPress={() => setShowStudentPreview((value) => !value)}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={styles.hallTicketPreviewToggleText}>
+                      {showStudentPreview ? 'Hide student preview' : 'Preview matching students'}
+                    </Text>
+                    <Ionicons
+                      name={showStudentPreview ? 'chevron-up' : 'chevron-down'}
+                      size={16}
+                      color={theme.colors.primary}
+                    />
+                  </TouchableOpacity>
+
+                  {showStudentPreview && (
+                    <View style={styles.hallTicketStudentList}>
+                      {preview.clearance_snapshots
+                        .filter((student) => student.within_range)
+                        .map((student) => (
+                          <View key={student.id} style={styles.hallTicketStudentRow}>
+                            <View style={styles.hallTicketStudentAvatar}>
+                              <Text style={styles.hallTicketStudentAvatarText}>
+                                {(student.display_name || '?').charAt(0).toUpperCase()}
+                              </Text>
+                            </View>
+                            <View style={styles.flex}>
+                              <Text style={styles.hallTicketStudentName} numberOfLines={1}>{student.display_name}</Text>
+                              <Text style={styles.hallTicketStudentMeta}>
+                                {student.admission_no}{student.no_fee_record ? ' · No fee record' : ''}
+                              </Text>
+                            </View>
+                            <View style={styles.hallTicketStudentStatus}>
+                              <Text style={styles.hallTicketStudentPercent}>{student.clearance_percent.toFixed(2)}%</Text>
+                              {(student.previously_downloaded || student.temporarily_reserved) && (
+                                <Text style={styles.hallTicketStudentBadge}>
+                                  {student.previously_downloaded ? 'Issued' : 'Reserved'}
+                                </Text>
+                              )}
+                            </View>
+                          </View>
+                        ))}
+                    </View>
+                  )}
+                </View>
+              ) : classId && sectionId && !rangeError ? (
+                <Text style={styles.helperText}>Eligibility preview will appear here.</Text>
+              ) : null}
+
+              {!!preview?.recent_batches.length && (
+                <View style={styles.hallTicketHistoryCard}>
+                  <View style={styles.hallTicketHistoryHeader}>
+                    <Ionicons name="time-outline" size={17} color={theme.colors.textSecondary} />
+                    <Text style={styles.hallTicketHistoryTitle}>Recent downloads</Text>
+                  </View>
+                  {preview.recent_batches.map((batch) => (
+                    <View key={batch.id} style={styles.hallTicketHistoryRow}>
+                      <View style={styles.flex}>
+                        <Text style={styles.hallTicketHistoryRange}>
+                          {batch.min_clearance_percent}%–{batch.max_clearance_percent}% · {batch.student_count} tickets
+                        </Text>
+                        <Text style={styles.hallTicketHistoryMeta}>
+                          {batch.operator_name || 'School user'}
+                          {batch.completed_at ? ` · ${new Date(batch.completed_at).toLocaleString()}` : ''}
+                        </Text>
+                      </View>
+                      <Text style={styles.hallTicketHistoryLayout}>{batch.tickets_per_page}/page</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
               <TouchableOpacity
                 style={[
                   styles.modalPrimaryBtn,
-                  (!classId || !sectionId || downloading) && styles.disabledBtn,
+                  cannotDownload && styles.disabledBtn,
                 ]}
                 activeOpacity={0.8}
-                disabled={!classId || !sectionId || downloading}
+                disabled={cannotDownload}
                 onPress={handleDownload}
               >
                 <Ionicons name="download-outline" size={17} color="#FFFFFF" />
                 <Text style={styles.modalPrimaryBtnText}>
                   {downloading
-                    ? 'Creating PDF…'
-                    : `Download ${ticketsPerPage}-per-page A4 hall tickets`}
+                    ? 'Preparing hall tickets…'
+                    : `Prepare & download ${readyCount} hall ticket${readyCount === 1 ? '' : 's'}`}
                 </Text>
               </TouchableOpacity>
             </ScrollView>
@@ -1489,11 +2124,14 @@ function ExamDetailView({
   detail,
   allocations,
   saving,
+  exportingMissingMarks,
   onBack,
   onGenerate,
   onEditPaper,
   onPublishToggle,
   onResultPublishToggle,
+  onExportMissingMarks,
+  onAssignTeacher,
   onQuickAllocate,
   onCustomizeAllocate,
   onManageRooms,
@@ -1501,17 +2139,21 @@ function ExamDetailView({
   onAddRoomToSitting,
   onHallTickets,
   onDeleteExam,
+  onSpecialSubjectsSaved,
 }: {
   styles: Styles;
   theme: Theme;
   detail: ExamTimetableDetail;
   allocations: ExamRoomAllocation[];
   saving: boolean;
+  exportingMissingMarks: boolean;
   onBack: () => void;
   onGenerate: () => void;
   onEditPaper: (p: ExamPaper) => void;
   onPublishToggle: () => void;
   onResultPublishToggle: () => void;
+  onExportMissingMarks: () => void;
+  onAssignTeacher?: (paper: ExamResultReadinessPaper, section: ExamResultReadinessSection) => void;
   onQuickAllocate: () => void;
   onCustomizeAllocate: () => void;
   onManageRooms: () => void;
@@ -1519,17 +2161,20 @@ function ExamDetailView({
   onAddRoomToSitting: (s: { exam_date: string; session_start: string }) => void;
   onHallTickets: () => void;
   onDeleteExam: () => void;
+  onSpecialSubjectsSaved?: () => void;
 }) {
   const { exam, papers } = detail;
   const category = examCategoryFor(exam.exam_type);
-  const groups = useMemo(() => groupPapersByDate(papers), [papers]);
+  const scheduledPapers = useMemo(() => papers.filter((paper) => !!paper.exam_date), [papers]);
+  const groups = useMemo(() => groupPapersByDate(scheduledPapers), [scheduledPapers]);
   const published = !!exam.timetable_published;
   const resultsPublished = !!exam.results_published;
   const resultReadiness = detail.result_readiness;
-  const incompleteResultPapers = resultReadiness.papers.filter((paper) => !paper.complete);
-  const missingTeachers = papers.filter((p) => p.has_teacher === false).length;
+  const resultsPublishable = resultReadiness.publishable ?? resultReadiness.entered_entries > 0;
+  const missingTeachers = scheduledPapers.filter((p) => p.has_teacher === false && !p.is_exam_only).length;
   const hasSeating = allocations.length > 0;
   const [seatingOpen, setSeatingOpen] = useState(!published || !hasSeating);
+  const [missingMarksModalVisible, setMissingMarksModalVisible] = useState(false);
 
   // Group room allocations into sittings (date + session).
   const sittingGroups = useMemo(() => {
@@ -1555,7 +2200,7 @@ function ExamDetailView({
   const missingInvigilators = allocations.filter((a) => !a.invigilator_staff_id).length;
 
   const progressSteps = [
-    { label: 'Schedule', done: papers.length > 0 },
+    { label: 'Schedule', done: scheduledPapers.length > 0 },
     { label: 'Seating', done: hasSeating },
     { label: 'Live', done: published },
   ];
@@ -1570,7 +2215,7 @@ function ExamDetailView({
 
   const nextStep: NextStep = published
     ? null
-    : papers.length === 0
+    : scheduledPapers.length === 0
       ? {
           kind: 'generate',
           title: 'Build the timetable',
@@ -1671,10 +2316,10 @@ function ExamDetailView({
                 <Ionicons name="calendar-outline" size={12} color={theme.colors.textSecondary} />
                 <Text style={styles.metaChipText}>{fmtDateRange(exam.start_date, exam.end_date)}</Text>
               </View>
-              {papers.length > 0 && (
+              {scheduledPapers.length > 0 && (
                 <View style={styles.metaChip}>
                   <Ionicons name="document-text-outline" size={12} color={theme.colors.textSecondary} />
-                  <Text style={styles.metaChipText}>{pluralCount(papers.length, 'paper')}</Text>
+                  <Text style={styles.metaChipText}>{pluralCount(scheduledPapers.length, 'scheduled paper')}</Text>
                 </View>
               )}
               {hasSeating && (
@@ -1754,7 +2399,7 @@ function ExamDetailView({
 
             <View style={styles.summaryActions}>
               <View style={styles.summaryActionsPrimary}>
-                {papers.length > 0 && (
+                {scheduledPapers.length > 0 && (
                   <>
                     <TouchableOpacity
                       style={styles.actionChip}
@@ -1834,6 +2479,29 @@ function ExamDetailView({
           </Animated.View>
         )}
 
+        {/* ── Marks readiness section: prominent placement above schedule & seating ── */}
+        <ExamMarksReadinessCard
+          readiness={resultReadiness}
+          resultsPublished={resultsPublished}
+          saving={saving}
+          exportingMissingMarks={exportingMissingMarks}
+          onOpenFullList={() => setMissingMarksModalVisible(true)}
+          onExportMissingMarks={onExportMissingMarks}
+          onResultPublishToggle={onResultPublishToggle}
+          onAssignTeacher={onAssignTeacher}
+          examName={t_field(exam.name, exam.name_te)}
+        />
+
+        {exam.exam_type === 'special' && (
+          <SpecialExamSubjectsCard
+            academicYearId={exam.academic_year_id}
+            examId={exam.id}
+            papers={papers}
+            resultsPublished={resultsPublished}
+            onSaved={onSpecialSubjectsSaved}
+          />
+        )}
+
         {/* Schedule first — the thing people actually read */}
         {groups.length > 0 && (
           <View style={styles.sectionHeaderRow}>
@@ -1878,7 +2546,9 @@ function ExamDetailView({
                           {t_field(paper.subject_name, paper.subject_name_te)}
                         </Text>
                         <View style={styles.classChip}>
-                          <Text style={styles.classChipText}>{paper.class_name}</Text>
+                          <Text style={styles.classChipText}>
+                            {paper.section_name ? `${paper.class_name} · ${paper.section_name}` : paper.class_name}
+                          </Text>
                         </View>
                       </View>
                       <View style={styles.paperMetaRow}>
@@ -1924,7 +2594,7 @@ function ExamDetailView({
         ))}
 
         {/* Seating — collapsed by default when live */}
-        {papers.length > 0 && (
+        {scheduledPapers.length > 0 && (
           <View style={styles.dateGroup}>
             <TouchableOpacity
               style={styles.seatingHeaderRow}
@@ -2117,7 +2787,7 @@ function ExamDetailView({
           </View>
         )}
 
-        {papers.length === 0 && !nextStep && (
+        {scheduledPapers.length === 0 && !nextStep && (
           <View style={styles.emptyWrap}>
             <Ionicons name="sparkles-outline" size={44} color={theme.colors.textTertiary} />
             <Text style={styles.emptyTitle}>Nothing scheduled</Text>
@@ -2127,92 +2797,10 @@ function ExamDetailView({
           </View>
         )}
 
-        {papers.length > 0 && (
-          <View style={styles.resultPublishCard}>
-            <View
-              style={[
-                styles.resultPublishIcon,
-                {
-                  backgroundColor: resultsPublished
-                    ? `${theme.colors.success}16`
-                    : resultReadiness.ready
-                      ? `${theme.colors.primary}14`
-                      : `${theme.colors.warning}16`,
-                },
-              ]}
-            >
-              <Ionicons
-                name={resultsPublished ? 'checkmark-circle-outline' : 'school-outline'}
-                size={22}
-                color={
-                  resultsPublished
-                    ? theme.colors.success
-                    : resultReadiness.ready
-                      ? theme.colors.primary
-                      : theme.colors.warning
-                }
-              />
-            </View>
-            <View style={styles.resultPublishBody}>
-              <Text style={styles.resultPublishTitle}>
-                {resultsPublished
-                  ? 'Results published'
-                  : resultReadiness.ready
-                    ? 'Results ready to publish'
-                    : 'Waiting for teachers'}
-              </Text>
-              <Text style={styles.resultPublishSub}>
-                {resultsPublished
-                  ? 'Parents and students can see this exam result.'
-                  : resultReadiness.expected_entries === 0
-                    ? 'No active student mark entries found for these papers.'
-                    : `${resultReadiness.entered_entries} of ${resultReadiness.expected_entries} mark entries complete`}
-              </Text>
-              {!resultsPublished && resultReadiness.missing_entries > 0 && (
-                <>
-                  <Text style={[styles.resultMissingText, { color: theme.colors.warning }]}>
-                    {`${resultReadiness.missing_entries} missing across ${incompleteResultPapers.length} paper${incompleteResultPapers.length === 1 ? '' : 's'}`}
-                  </Text>
-                  {incompleteResultPapers.slice(0, 2).map((paper) => (
-                    <Text key={paper.exam_subject_id} style={styles.resultPaperMissing} numberOfLines={1}>
-                      {`${paper.class_name} · ${paper.subject_name}: ${paper.missing_entries} missing`}
-                    </Text>
-                  ))}
-                </>
-              )}
-            </View>
-            {resultsPublished ? (
-              <TouchableOpacity
-                style={[styles.resultUnpublishBtn, saving && styles.disabledBtn]}
-                disabled={saving}
-                activeOpacity={0.8}
-                onPress={onResultPublishToggle}
-              >
-                <Text style={styles.resultUnpublishBtnText}>Unpublish</Text>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                style={[
-                  styles.resultPublishBtn,
-                  { backgroundColor: resultReadiness.ready ? theme.colors.primary : theme.colors.border },
-                  saving && styles.disabledBtn,
-                ]}
-                disabled={saving || !resultReadiness.ready}
-                activeOpacity={0.8}
-                onPress={onResultPublishToggle}
-              >
-                <Ionicons name="megaphone-outline" size={15} color="#FFFFFF" />
-                <Text style={styles.resultPublishBtnText}>
-                  {resultReadiness.ready ? 'Publish results' : 'Not ready'}
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        )}
         <View style={styles.bottomSpacer} />
       </ScrollView>
 
-      {papers.length > 0 && (
+      {scheduledPapers.length > 0 && (
         <View style={styles.publishBar}>
           <View
             style={[
@@ -2257,6 +2845,17 @@ function ExamDetailView({
           )}
         </View>
       )}
+
+      {/* ── Virtualized Missing Marks Follow-up Modal ── */}
+      <ExamMissingMarksModal
+        visible={missingMarksModalVisible}
+        onClose={() => setMissingMarksModalVisible(false)}
+        readiness={resultReadiness}
+        examName={t_field(exam.name, exam.name_te)}
+        exportingMissingMarks={exportingMissingMarks}
+        onExportMissingMarks={onExportMissingMarks}
+        onAssignTeacher={onAssignTeacher}
+      />
     </View>
   );
 }
@@ -2283,6 +2882,7 @@ function CreateExamModal({
   const [category, setCategory] = useState<ExamCategory>(EXAM_CATEGORIES[1]);
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
+  const [specialSubjects, setSpecialSubjects] = useState<SpecialSubjectSpec[]>([]);
 
   const suggestions = (category.subExams || []).filter(
     (s) => !existingNames.includes(`${category.key}|${s}`)
@@ -2302,18 +2902,31 @@ function CreateExamModal({
       alertCompat('Already exists', 'An exam with this name already exists for this category.');
       return;
     }
+    if (
+      category.key === 'special'
+      && specialSubjects.some((subject) => !subject.name || subject.targets.length === 0)
+    ) {
+      alertCompat(
+        'Special subjects',
+        'Each special subject needs a name, maximum marks, and at least one class or section.',
+      );
+      return;
+    }
     try {
       setBusy(true);
       const created = await ResultService.createExam({
         name: finalName,
         academic_year_id: currentYear.id,
         exam_type: category.key,
+        ...(category.key === 'special' && specialSubjects.length > 0
+          ? { special_subjects: specialSubjects }
+          : {}),
       });
       const examId = (created as any)?.exam?.id || (created as any)?.id;
       setName('');
       onCreated(examId);
-    } catch {
-      alertCompat('Error', 'Failed to create exam');
+    } catch (error: any) {
+      alertCompat('Error', error?.message || 'Failed to create exam');
     } finally {
       setBusy(false);
     }
@@ -2376,6 +2989,13 @@ function CreateExamModal({
             {currentYear && (
               <Text style={styles.helperText}>Academic year: {currentYear.code}</Text>
             )}
+            {category.key === 'special' && currentYear && (
+              <SpecialExamSubjectsCard
+                academicYearId={currentYear.id}
+                papers={[]}
+                onSpecsChange={setSpecialSubjects}
+              />
+            )}
           </ScrollView>
           <TouchableOpacity
             style={[styles.modalPrimaryBtn, busy && styles.disabledBtn]}
@@ -2383,7 +3003,13 @@ function CreateExamModal({
             disabled={busy}
             activeOpacity={0.85}
           >
-            <Text style={styles.modalPrimaryBtnText}>{busy ? 'Creating…' : 'Create & set up timetable'}</Text>
+            <Text style={styles.modalPrimaryBtnText}>
+              {busy
+                ? 'Creating…'
+                : category.key === 'special' && specialSubjects.length > 0
+                  ? 'Create exam'
+                  : 'Create & set up timetable'}
+            </Text>
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -2419,6 +3045,9 @@ function GenerateModal({
   const { width: viewportWidth } = useWindowDimensions();
   const compactLayout = viewportWidth < 560;
   const [classIds, setClassIds] = useState<string[]>([]);
+  const [classSectionIds, setClassSectionIds] = useState<string[]>([]);
+  const [availableSections, setAvailableSections] = useState<ClassSection[]>([]);
+  const [sectionsLoading, setSectionsLoading] = useState(false);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [sessions, setSessions] = useState<ExamSessionDraft[]>([
@@ -2448,6 +3077,41 @@ function GenerateModal({
   const initialSubjectIds = React.useRef<string[] | null>(null);
   const prevOptionIds = React.useRef<Set<string>>(new Set());
 
+  // Load available sections for the exam's academic year
+  useEffect(() => {
+    if (!visible || !academicYearId) return;
+    let active = true;
+    setSectionsLoading(true);
+    ClassService.getClassSections(academicYearId)
+      .then((data) => {
+        if (!active) return;
+        setAvailableSections(data);
+        const validSectionIds = new Set(data.map((section) => section.id));
+        setClassSectionIds((previous) => previous.filter((id) => validSectionIds.has(id)));
+      })
+      .catch(() => {
+        if (active) setAvailableSections([]);
+      })
+      .finally(() => {
+        if (active) setSectionsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [visible, academicYearId]);
+
+  const sectionsByClass = useMemo(() => {
+    const map = new Map<string, ClassSection[]>();
+    for (const cs of availableSections) {
+      if (!map.has(cs.class_id)) map.set(cs.class_id, []);
+      map.get(cs.class_id)!.push(cs);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => a.section_name.localeCompare(b.section_name));
+    }
+    return map;
+  }, [availableSections]);
+
   // Pre-fill from the last generation so "regenerate with tweaks" is painless.
   useEffect(() => {
     if (!visible) return;
@@ -2457,6 +3121,7 @@ function GenerateModal({
     if (initialParams) {
       const availableClassIds = new Set(classes.map((item) => item.id));
       setClassIds((initialParams.class_ids || []).filter((id) => availableClassIds.has(id)));
+      setClassSectionIds(initialParams.class_section_ids || []);
       setStartDate(initialParams.start_date || '');
       setEndDate(initialParams.end_date || '');
       const savedSessions = (initialParams.sessions || []).map(toSessionDraft);
@@ -2490,7 +3155,13 @@ function GenerateModal({
       setExcludedDates(initialParams.excluded_dates || []);
       setGapDays(initialParams.gap_days || 0);
       setMaxConsecutiveDays(initialParams.max_consecutive_days || 0);
-      setMode(initialParams.mode === 'per_class' ? 'per_class' : 'aligned');
+      setMode(
+        initialParams.mode === 'per_section'
+          ? 'per_section'
+          : initialParams.mode === 'per_class'
+            ? 'per_class'
+            : 'aligned'
+      );
       setMaxMarks(String(initialParams.max_marks ?? 100));
       setPassingMarks(String(initialParams.passing_marks ?? 35));
       setSubjectMarks(
@@ -2509,6 +3180,7 @@ function GenerateModal({
         : null;
     } else {
       setClassIds([]);
+      setClassSectionIds([]);
       setStartDate('');
       setEndDate('');
       setSessions([toSessionDraft(DEFAULT_SESSION_TIMES[0])]);
@@ -2528,13 +3200,14 @@ function GenerateModal({
     }
   }, [visible, initialParams, classes]);
 
-  // Refresh the subject list whenever the class selection changes.
+  // Refresh the subject list whenever the class or section selection changes.
   // Rules: saved selection order wins on first load; a subject the admin
   // deselected stays deselected; subjects that become newly available (from
-  // adding a class) join the selection at the end.
+  // adding a class/section) join the selection at the end.
   useEffect(() => {
     if (!visible) return;
-    if (classIds.length === 0) {
+    const hasTargets = mode === 'per_section' ? classSectionIds.length > 0 : classIds.length > 0;
+    if (!hasTargets) {
       setSubjectOptions([]);
       setSubjectSel([]);
       setSubjectLoadError('');
@@ -2546,7 +3219,11 @@ function GenerateModal({
       try {
         setSubjectsLoading(true);
         setSubjectLoadError('');
-        const options = await ExamTimetableService.getClassSubjects(classIds, academicYearId);
+        const options = await ExamTimetableService.getClassSubjects(
+          classIds,
+          academicYearId,
+          mode === 'per_section' ? classSectionIds : undefined
+        );
         if (cancelled) return;
         setSubjectOptions(options);
         const available = options.map((o) => o.id);
@@ -2580,10 +3257,99 @@ function GenerateModal({
     return () => {
       cancelled = true;
     };
-  }, [visible, academicYearId, classIds, subjectReloadKey]);
+  }, [visible, academicYearId, classIds, classSectionIds, mode, subjectReloadKey]);
+
+  const toggleSection = (sectionId: string, parentClassId: string) => {
+    setClassSectionIds((prev) => {
+      const nextSections = prev.includes(sectionId)
+        ? prev.filter((id) => id !== sectionId)
+        : [...prev, sectionId];
+
+      const classSecs = sectionsByClass.get(parentClassId) || [];
+      const hasAnySelected = classSecs.some((cs) => nextSections.includes(cs.id));
+      setClassIds((cIds) => {
+        if (hasAnySelected && !cIds.includes(parentClassId)) {
+          return [...cIds, parentClassId];
+        }
+        if (!hasAnySelected && cIds.includes(parentClassId)) {
+          return cIds.filter((c) => c !== parentClassId);
+        }
+        return cIds;
+      });
+
+      return nextSections;
+    });
+  };
 
   const toggleClass = (id: string) => {
-    setClassIds((prev) => (prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id]));
+    if (mode === 'per_section') {
+      const classSecs = sectionsByClass.get(id) || [];
+      const secIds = classSecs.map((cs) => cs.id);
+      const allClassSecsSelected = secIds.length > 0 && secIds.every((sId) => classSectionIds.includes(sId));
+
+      if (allClassSecsSelected) {
+        setClassSectionIds((prev) => prev.filter((sId) => !secIds.includes(sId)));
+        setClassIds((prev) => prev.filter((c) => c !== id));
+      } else {
+        setClassSectionIds((prev) => Array.from(new Set([...prev, ...secIds])));
+        setClassIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+      }
+      return;
+    }
+
+    setClassIds((prev) => {
+      const next = prev.includes(id) ? prev.filter((c) => c !== id) : [...prev, id];
+      const classSecs = sectionsByClass.get(id) || [];
+      const secIds = classSecs.map((cs) => cs.id);
+      if (next.includes(id)) {
+        setClassSectionIds((sPrev) => Array.from(new Set([...sPrev, ...secIds])));
+      } else {
+        setClassSectionIds((sPrev) => sPrev.filter((sId) => !secIds.includes(sId)));
+      }
+      return next;
+    });
+  };
+
+  const handleModeChange = (newMode: ExamScheduleMode) => {
+    setMode(newMode);
+    if (newMode === 'per_section') {
+      if (classSectionIds.length === 0 && classIds.length > 0) {
+        const toSelect: string[] = [];
+        for (const cid of classIds) {
+          const secs = sectionsByClass.get(cid) || [];
+          for (const s of secs) toSelect.push(s.id);
+        }
+        if (toSelect.length > 0) {
+          setClassSectionIds(toSelect);
+        }
+      }
+    }
+  };
+
+  const allSectionsSelected =
+    availableSections.length > 0 &&
+    availableSections.every((cs) => classSectionIds.includes(cs.id));
+  const allClassesSelected =
+    classes.length > 0 && classes.every((c) => classIds.includes(c.id));
+
+  const toggleAll = () => {
+    if (mode === 'per_section') {
+      if (allSectionsSelected) {
+        setClassSectionIds([]);
+        setClassIds([]);
+      } else {
+        setClassSectionIds(availableSections.map((cs) => cs.id));
+        setClassIds(classes.map((c) => c.id));
+      }
+    } else {
+      if (allClassesSelected) {
+        setClassIds([]);
+        setClassSectionIds([]);
+      } else {
+        setClassIds(classes.map((c) => c.id));
+        setClassSectionIds(availableSections.map((cs) => cs.id));
+      }
+    }
   };
 
   const toggleSubject = (id: string) => {
@@ -2698,7 +3464,11 @@ function GenerateModal({
     requiredDateCount > usableDateCount;
 
   const submit = async () => {
-    if (classIds.length === 0) {
+    if (mode === 'per_section' && classSectionIds.length === 0) {
+      alertCompat('Select sections', 'Pick at least one section for this exam.');
+      return;
+    }
+    if (mode !== 'per_section' && classIds.length === 0) {
       alertCompat('Select classes', 'Pick at least one class for this exam.');
       return;
     }
@@ -2788,6 +3558,7 @@ function GenerateModal({
     }
     const params: ExamGenerateParams = {
       class_ids: classIds,
+      class_section_ids: mode === 'per_section' ? classSectionIds : undefined,
       start_date: startDate,
       end_date: endDate,
       sessions: sessions.map((s) => ({
@@ -2836,13 +3607,12 @@ function GenerateModal({
     accentColor: theme.colors.primary,
     iconColor: theme.colors.textSecondary,
   };
-  const allClassesSelected =
-    classes.length > 0 && classes.every((item) => classIds.includes(item.id));
   const generateDisabled =
     busy ||
     subjectsLoading ||
+    (mode === 'per_section' && sectionsLoading) ||
     !!subjectLoadError ||
-    classIds.length === 0 ||
+    (mode === 'per_section' ? classSectionIds.length === 0 : classIds.length === 0) ||
     subjectSel.length === 0 ||
     allowedWeekdays.length === 0 ||
     dateCapacityShort;
@@ -2867,35 +3637,151 @@ function GenerateModal({
           </View>
 
           <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-            <Text style={styles.fieldLabel}>Classes</Text>
+            <Text style={styles.fieldLabel}>Schedule model</Text>
+            <View style={[styles.segment, compactLayout && styles.columnStack]}>
+              {(
+                [
+                  ['aligned', 'Aligned', 'Shared subjects run together across classes'],
+                  ['per_class', 'Per class', 'Each class gets its own compact sequence'],
+                  ['per_section', 'Per section', 'Each class section gets its own compact exam sequence'],
+                ] as const
+              ).map(([value, label, hint]) => {
+                const active = mode === value;
+                return (
+                  <TouchableOpacity
+                    key={value}
+                    style={[styles.segmentItem, active && styles.segmentItemActive]}
+                    onPress={() => handleModeChange(value)}
+                    activeOpacity={0.8}
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: active }}
+                  >
+                    <Text style={[styles.segmentLabel, active && styles.segmentLabelActive]}>{label}</Text>
+                    <Text style={[styles.segmentHint, active && styles.segmentHintActive]}>{hint}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <View style={styles.subjectHeaderRow}>
+              <Text style={styles.fieldLabel}>
+                {mode === 'per_section' ? 'Classes & Sections' : 'Classes'}
+              </Text>
+              {mode === 'per_section' && (
+                <Text style={styles.inlineActionText}>
+                  {classSectionIds.length} section{classSectionIds.length === 1 ? '' : 's'} selected
+                </Text>
+              )}
+            </View>
+
             <View style={styles.chipWrap}>
               <TouchableOpacity
-                style={[styles.chip, allClassesSelected && styles.chipActive]}
-                onPress={() =>
-                  setClassIds(allClassesSelected ? [] : classes.map((c) => c.id))
-                }
+                style={[
+                  styles.chip,
+                  (mode === 'per_section' ? allSectionsSelected : allClassesSelected) && styles.chipActive,
+                ]}
+                onPress={toggleAll}
                 activeOpacity={0.7}
               >
                 <Text
-                  style={[styles.chipText, allClassesSelected && styles.chipTextActive]}
+                  style={[
+                    styles.chipText,
+                    (mode === 'per_section' ? allSectionsSelected : allClassesSelected) && styles.chipTextActive,
+                  ]}
                 >
                   All
                 </Text>
               </TouchableOpacity>
               {classes.map((c) => {
-                const active = classIds.includes(c.id);
+                const classSecs = sectionsByClass.get(c.id) || [];
+                const active = mode === 'per_section'
+                  ? classSecs.length > 0 && classSecs.every((cs) => classSectionIds.includes(cs.id))
+                  : classIds.includes(c.id);
+                const partiallyActive = mode === 'per_section' && !active && classSecs.some((cs) => classSectionIds.includes(cs.id));
                 return (
                   <TouchableOpacity
                     key={c.id}
-                    style={[styles.chip, active && styles.chipActive]}
+                    style={[
+                      styles.chip,
+                      active && styles.chipActive,
+                      partiallyActive && { borderColor: theme.colors.primary, borderWidth: 1.5 },
+                    ]}
                     onPress={() => toggleClass(c.id)}
                     activeOpacity={0.7}
                   >
-                    <Text style={[styles.chipText, active && styles.chipTextActive]}>{c.name}</Text>
+                    <Text
+                      style={[
+                        styles.chipText,
+                        active && styles.chipTextActive,
+                        partiallyActive && { color: theme.colors.primary, fontWeight: '700' },
+                      ]}
+                    >
+                      {c.name}
+                      {partiallyActive && ` (${classSecs.filter((s) => classSectionIds.includes(s.id)).length}/${classSecs.length})`}
+                    </Text>
                   </TouchableOpacity>
                 );
               })}
             </View>
+
+            {mode === 'per_section' && sectionsLoading && (
+              <View style={styles.inlineStatusCard}>
+                <ActivityIndicator size="small" color={theme.colors.primary} />
+                <Text style={styles.helperText}>Loading sections…</Text>
+              </View>
+            )}
+
+            {mode === 'per_section' && !sectionsLoading && classes.length > 0 && (
+              <View style={{ marginTop: 12, marginBottom: 8 }}>
+                {classes.filter((c) => (sectionsByClass.get(c.id) || []).length > 0).map((c) => {
+                  const classSecs = sectionsByClass.get(c.id) || [];
+                  const allSelected = classSecs.every((cs) => classSectionIds.includes(cs.id));
+                  return (
+                    <View
+                      key={`sec-group-${c.id}`}
+                      style={{
+                        marginBottom: 10,
+                        padding: 10,
+                        backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+                        borderRadius: 10,
+                        borderWidth: 1,
+                        borderColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)',
+                      }}
+                    >
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: theme.colors.text }}>{c.name}</Text>
+                        <TouchableOpacity onPress={() => toggleClass(c.id)}>
+                          <Text style={{ fontSize: 11, color: theme.colors.primary, fontWeight: '600' }}>
+                            {allSelected ? 'Deselect all' : 'Select all'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                        {classSecs.map((cs) => {
+                          const isSecSelected = classSectionIds.includes(cs.id);
+                          return (
+                            <TouchableOpacity
+                              key={cs.id}
+                              style={[
+                                styles.chip,
+                                { paddingHorizontal: 12, paddingVertical: 5 },
+                                isSecSelected && styles.chipActive,
+                              ]}
+                              onPress={() => toggleSection(cs.id, c.id)}
+                              activeOpacity={0.7}
+                            >
+                              <Text style={[styles.chipText, isSecSelected && styles.chipTextActive]}>
+                                Section {cs.section_name}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
 
             <View style={styles.subjectHeaderRow}>
               <Text style={[styles.fieldLabel, { marginTop: 0, marginBottom: 0 }]}>
@@ -2917,8 +3803,10 @@ function GenerateModal({
                 </View>
               )}
             </View>
-            {classIds.length === 0 ? (
-              <Text style={styles.helperText}>Select classes to load their subjects.</Text>
+            {(mode === 'per_section' ? classSectionIds.length === 0 : classIds.length === 0) ? (
+              <Text style={styles.helperText}>
+                {mode === 'per_section' ? 'Select sections to load their subjects.' : 'Select classes to load their subjects.'}
+              </Text>
             ) : subjectsLoading ? (
               <View style={styles.inlineStatusCard}>
                 <ActivityIndicator size="small" color={theme.colors.primary} />
@@ -3241,27 +4129,6 @@ function GenerateModal({
             )}
 
             <Text style={styles.fieldLabel}>Scheduling rules</Text>
-            <View style={styles.segment}>
-              {(
-                [
-                  ['aligned', 'Aligned', 'Shared subjects run together across classes'],
-                  ['per_class', 'Per class', 'Each class gets its own compact sequence'],
-                ] as const
-              ).map(([value, label, hint]) => {
-                const active = mode === value;
-                return (
-                  <TouchableOpacity
-                    key={value}
-                    style={[styles.segmentItem, active && styles.segmentItemActive]}
-                    onPress={() => setMode(value)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={[styles.segmentLabel, active && styles.segmentLabelActive]}>{label}</Text>
-                    <Text style={[styles.segmentHint, active && styles.segmentHintActive]}>{hint}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
             <View style={[styles.ruleGrid, compactLayout && styles.columnStack]}>
               <View style={[styles.ruleCard, compactLayout && styles.ruleCardCompact]}>
                 <Text style={styles.ruleTitle}>Rest days after every exam date</Text>
@@ -3427,6 +4294,11 @@ function GenerateModal({
                     Per-class mode may use fewer dates when classes teach different subjects.
                   </Text>
                 )}
+                {mode === 'per_section' && (
+                  <Text style={styles.previewHint}>
+                    Per-section mode schedules each section in its own compact sequence across {classSectionIds.length} section(s).
+                  </Text>
+                )}
               </View>
             </View>
           </ScrollView>
@@ -3529,24 +4401,28 @@ function EditPaperModal({
   };
 
   const remove = () => {
-    alertCompat('Remove this paper?', `${paper.subject_name} — ${paper.class_name}`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            setBusy(true);
-            await ExamTimetableService.deletePaper(paper.id);
-            onSaved();
-          } catch (err: any) {
-            alertCompat('Could not remove', err?.message || 'Delete failed');
-          } finally {
-            setBusy(false);
-          }
+    alertCompat(
+      'Remove this paper?',
+      `${paper.subject_name} — ${paper.section_name ? `${paper.class_name} (${paper.section_name})` : paper.class_name}`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              setBusy(true);
+              await ExamTimetableService.deletePaper(paper.id);
+              onSaved();
+            } catch (err: any) {
+              alertCompat('Could not remove', err?.message || 'Delete failed');
+            } finally {
+              setBusy(false);
+            }
+          },
         },
-      },
-    ]);
+      ]
+    );
   };
 
   return (
@@ -3561,7 +4437,9 @@ function EditPaperModal({
               <Text style={styles.modalTitle} numberOfLines={1}>
                 {paper.subject_name}
               </Text>
-              <Text style={styles.examCardSub}>{paper.class_name}</Text>
+              <Text style={styles.examCardSub}>
+                {paper.section_name ? `${paper.class_name} · Section ${paper.section_name}` : paper.class_name}
+              </Text>
             </View>
             <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Ionicons name="close" size={22} color={theme.colors.textSecondary} />
@@ -4716,21 +5594,20 @@ const getStyles = (theme: Theme, isDark: boolean) =>
     filterChipTextActive: { color: theme.colors.primary, fontWeight: '700' },
 
     examCard: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 12,
       backgroundColor: theme.colors.card,
       borderRadius: 16,
       borderWidth: 1,
       borderColor: isDark ? theme.colors.border : theme.colors.borderLight,
-      marginBottom: 8,
-      paddingVertical: 12,
-      paddingHorizontal: 12,
+      marginBottom: 12,
       ...(Platform.OS === 'ios'
         ? { shadowColor: '#0F172A', shadowOffset: { width: 0, height: 2 }, shadowOpacity: isDark ? 0 : 0.04, shadowRadius: 8 }
         : Platform.OS === 'web'
           ? ({ boxShadow: isDark ? 'none' : '0 2px 10px rgba(15,23,42,0.04)' } as any)
           : { elevation: 1 }),
+    },
+    examCardTopRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
     },
     examCardOpen: {
       flex: 1,
@@ -4747,6 +5624,7 @@ const getStyles = (theme: Theme, isDark: boolean) =>
       alignItems: 'center',
       justifyContent: 'center',
       backgroundColor: `${theme.colors.primary}10`,
+      marginRight: 14,
     },
     hallTicketCardBtn: {
       width: 72,
@@ -4794,6 +5672,55 @@ const getStyles = (theme: Theme, isDark: boolean) =>
       color: theme.colors.primary,
       marginTop: 2,
     },
+    resultQuickRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      minHeight: 64,
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      borderTopWidth: 1,
+      borderTopColor: isDark ? theme.colors.border : theme.colors.borderLight,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.018)' : '#FBFCFE',
+      borderBottomLeftRadius: 16,
+      borderBottomRightRadius: 16,
+    },
+    resultQuickIcon: {
+      width: 34,
+      height: 34,
+      borderRadius: 11,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    resultQuickBody: { flex: 1, minWidth: 0 },
+    resultQuickTitle: { fontSize: 12.5, fontWeight: '800' },
+    resultQuickSub: { fontSize: 11, color: theme.colors.textSecondary, marginTop: 1 },
+    resultProgressTrack: {
+      height: 3,
+      borderRadius: 2,
+      backgroundColor: theme.colors.border,
+      marginTop: 6,
+      overflow: 'hidden',
+    },
+    resultProgressFill: { height: '100%', borderRadius: 2 },
+    resultQuickAction: {
+      minHeight: 36,
+      paddingHorizontal: 12,
+      borderRadius: 11,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+      backgroundColor: theme.colors.card,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 5,
+    },
+    resultQuickActionPrimary: {
+      borderColor: theme.colors.primary,
+      backgroundColor: theme.colors.primary,
+    },
+    resultQuickActionText: { fontSize: 11.5, fontWeight: '800', color: theme.colors.text },
+    resultQuickActionTextPrimary: { color: '#FFFFFF' },
     examCardMetaRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginTop: 2 },
     metaChip: {
       flexDirection: 'row',
@@ -5279,46 +6206,7 @@ const getStyles = (theme: Theme, isDark: boolean) =>
       textAlign: 'center',
     },
 
-    resultPublishCard: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 12,
-      marginTop: 14,
-      padding: 14,
-      borderRadius: 16,
-      borderWidth: 1,
-      borderColor: theme.colors.border,
-      backgroundColor: theme.colors.card,
-    },
-    resultPublishIcon: {
-      width: 42,
-      height: 42,
-      borderRadius: 13,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    resultPublishBody: { flex: 1 },
-    resultPublishTitle: { fontSize: 14, fontWeight: '800', color: theme.colors.textStrong },
-    resultPublishSub: { fontSize: 11.5, color: theme.colors.textSecondary, marginTop: 2 },
-    resultMissingText: { fontSize: 11.5, fontWeight: '700', marginTop: 3 },
-    resultPaperMissing: { fontSize: 10.5, color: theme.colors.textTertiary, marginTop: 2 },
-    resultPublishBtn: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-      paddingHorizontal: 14,
-      paddingVertical: 11,
-      borderRadius: 12,
-    },
-    resultPublishBtnText: { color: '#FFFFFF', fontSize: 12.5, fontWeight: '800' },
-    resultUnpublishBtn: {
-      paddingHorizontal: 13,
-      paddingVertical: 10,
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: theme.colors.border,
-    },
-    resultUnpublishBtnText: { color: theme.colors.text, fontSize: 12.5, fontWeight: '700' },
+
 
     publishBar: {
       flexDirection: 'row',
@@ -5564,6 +6452,191 @@ const getStyles = (theme: Theme, isDark: boolean) =>
       lineHeight: 17,
       color: theme.colors.textSecondary,
     },
+    hallTicketOptionRow: {
+      marginTop: 10,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      paddingHorizontal: 12,
+      paddingVertical: 11,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+      backgroundColor: theme.colors.background,
+    },
+    hallTicketOptionIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: `${theme.colors.primary}12`,
+    },
+    hallTicketOptionTitle: { fontSize: 13, fontWeight: '800', color: theme.colors.textStrong },
+    hallTicketOptionText: { marginTop: 2, fontSize: 10.5, lineHeight: 14, color: theme.colors.textTertiary },
+    hallTicketSectionHeader: {
+      marginTop: 18,
+      marginBottom: 10,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
+    hallTicketSectionIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: `${theme.colors.primary}12`,
+    },
+    hallTicketSectionTitle: { fontSize: 14, fontWeight: '800', color: theme.colors.textStrong },
+    hallTicketSectionText: { marginTop: 2, fontSize: 10.5, lineHeight: 14, color: theme.colors.textTertiary },
+    hallTicketRangeRow: {
+      marginTop: 12,
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      gap: 10,
+    },
+    hallTicketRangeField: { flex: 1, minWidth: 0 },
+    hallTicketRangeDivider: {
+      paddingBottom: 13,
+      fontSize: 11,
+      fontWeight: '700',
+      color: theme.colors.textTertiary,
+      textTransform: 'uppercase',
+    },
+    hallTicketValidationText: {
+      marginTop: 6,
+      fontSize: 11,
+      lineHeight: 15,
+      fontWeight: '600',
+      color: theme.colors.danger,
+    },
+    hallTicketTrackingWarning: {
+      marginTop: 10,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 9,
+      padding: 11,
+      borderWidth: 1,
+      borderColor: `${theme.colors.warning}55`,
+      borderRadius: 12,
+      backgroundColor: `${theme.colors.warning}10`,
+    },
+    hallTicketTrackingTitle: { fontSize: 12.5, fontWeight: '800', color: theme.colors.textStrong },
+    hallTicketTrackingText: { marginTop: 2, fontSize: 10.5, color: theme.colors.textSecondary },
+    hallTicketPreviewLoading: {
+      marginTop: 12,
+      minHeight: 72,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      borderRadius: 14,
+      backgroundColor: theme.colors.background,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+    },
+    hallTicketPreviewError: {
+      marginTop: 12,
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 8,
+      padding: 12,
+      borderRadius: 12,
+      backgroundColor: `${theme.colors.danger}0C`,
+      borderWidth: 1,
+      borderColor: `${theme.colors.danger}30`,
+    },
+    hallTicketPreviewErrorText: { flex: 1, fontSize: 11.5, lineHeight: 16, color: theme.colors.danger },
+    hallTicketEligibilityCard: {
+      marginTop: 12,
+      padding: 14,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: `${theme.colors.primary}28`,
+      backgroundColor: `${theme.colors.primary}08`,
+    },
+    hallTicketEligibilityTop: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    hallTicketEligibilityEyebrow: {
+      fontSize: 9.5,
+      letterSpacing: 0.7,
+      fontWeight: '800',
+      color: theme.colors.primary,
+    },
+    hallTicketEligibilityCount: { marginTop: 1, fontSize: 30, lineHeight: 34, fontWeight: '900', color: theme.colors.textStrong },
+    hallTicketStatsGrid: { marginTop: 12, flexDirection: 'row', gap: 7 },
+    hallTicketStat: {
+      flex: 1,
+      paddingVertical: 8,
+      paddingHorizontal: 5,
+      alignItems: 'center',
+      borderRadius: 10,
+      backgroundColor: theme.colors.card,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+    },
+    hallTicketStatValue: { fontSize: 14, fontWeight: '900', color: theme.colors.textStrong },
+    hallTicketStatLabel: { marginTop: 2, fontSize: 9.5, fontWeight: '600', color: theme.colors.textTertiary },
+    hallTicketPreviewToggle: {
+      marginTop: 10,
+      paddingTop: 10,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      borderTopWidth: 1,
+      borderTopColor: theme.colors.border,
+    },
+    hallTicketPreviewToggleText: { fontSize: 11.5, fontWeight: '800', color: theme.colors.primary },
+    hallTicketStudentList: { marginTop: 8, gap: 5 },
+    hallTicketStudentRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingVertical: 7,
+      paddingHorizontal: 8,
+      borderRadius: 10,
+      backgroundColor: theme.colors.card,
+    },
+    hallTicketStudentAvatar: {
+      width: 28,
+      height: 28,
+      borderRadius: 9,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: `${theme.colors.primary}14`,
+    },
+    hallTicketStudentAvatarText: { fontSize: 11, fontWeight: '900', color: theme.colors.primary },
+    hallTicketStudentName: { fontSize: 11.5, fontWeight: '700', color: theme.colors.textStrong },
+    hallTicketStudentMeta: { marginTop: 1, fontSize: 9.5, color: theme.colors.textTertiary },
+    hallTicketStudentStatus: { alignItems: 'flex-end' },
+    hallTicketStudentPercent: { fontSize: 11.5, fontWeight: '900', color: theme.colors.textStrong },
+    hallTicketStudentBadge: { marginTop: 2, fontSize: 8.5, fontWeight: '800', color: theme.colors.warning },
+    hallTicketHistoryCard: {
+      marginTop: 12,
+      padding: 12,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: theme.colors.border,
+      backgroundColor: theme.colors.background,
+    },
+    hallTicketHistoryHeader: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 5 },
+    hallTicketHistoryTitle: { fontSize: 12.5, fontWeight: '800', color: theme.colors.textStrong },
+    hallTicketHistoryRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingVertical: 7,
+      borderTopWidth: 1,
+      borderTopColor: theme.colors.border,
+    },
+    hallTicketHistoryRange: { fontSize: 10.5, fontWeight: '700', color: theme.colors.textSecondary },
+    hallTicketHistoryMeta: { marginTop: 2, fontSize: 9, color: theme.colors.textTertiary },
+    hallTicketHistoryLayout: { fontSize: 9.5, fontWeight: '800', color: theme.colors.primary },
     fieldLabel: {
       fontSize: 12,
       fontWeight: '700',

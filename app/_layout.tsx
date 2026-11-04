@@ -20,6 +20,7 @@ import * as IntentLauncher from 'expo-intent-launcher';
 import { useNotifications } from '../src/hooks/useNotifications';
 import { useAuthGuard } from '../src/hooks/useAuthGuard';
 import { useNotificationObserver } from '../src/hooks/useNotificationObserver';
+import { useAdminScreenUsage } from '../src/hooks/useAdminScreenUsage';
 import { AuthGate } from '../src/components/AuthGate';
 import FingerprintLockGate from '../src/components/FingerprintLockGate';
 import SchoolRibbon, {
@@ -44,7 +45,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import ForceUpdateScreen from '../src/components/ForceUpdateScreen';
 import { useVersionCheck } from '../src/hooks/useVersionCheck';
+import { usePlayStoreUpdate, type PlayStoreUpdateController } from '../src/hooks/usePlayStoreUpdate';
+import AppUpdateBanner from '../src/components/AppUpdateBanner';
 import FestivalPosterGate from '../src/components/FestivalPosterGate';
+import PopupQueueProvider from '../src/features/popups/components/PopupQueueProvider';
+import { TourProvider, TourOverlayHost } from '../src/features/app-tour';
 import { selectDisposableVersionCacheKeys } from '../src/utils/updateCachePolicy';
 
 // Keep the splash screen visible while we fetch resources
@@ -58,6 +63,7 @@ export default function Layout() {
   const [appReady, setAppReady] = useState(false);
   const [buildConfigError, setBuildConfigError] = useState<string | null>(null);
   const { updateRequired } = useVersionCheck();
+  const playUpdate = usePlayStoreUpdate(updateRequired);
 
   // Inject portal root for web (must happen before any alert can fire)
   useEffect(() => {
@@ -123,7 +129,7 @@ export default function Layout() {
   }
 
   if (updateRequired) {
-    return <ForceUpdateScreen />;
+    return <ForceUpdateScreen update={playUpdate} />;
   }
 
   if (buildConfigError && __DEV__) {
@@ -149,7 +155,7 @@ export default function Layout() {
       <ThemeProvider>
         <KeyboardProvider>
           <CustomAlertProvider>
-            <ThemeSyncWrapper />
+            <TourProvider><ThemeSyncWrapper playUpdate={playUpdate} /></TourProvider>
           </CustomAlertProvider>
         </KeyboardProvider>
       </ThemeProvider>
@@ -157,7 +163,7 @@ export default function Layout() {
 
 }
 
-function ThemeSyncWrapper() {
+function ThemeSyncWrapper({ playUpdate }: { playUpdate: PlayStoreUpdateController }) {
   const { theme, isDark } = useContext(ThemeContext);
   const getSchoolHeader = useSchoolHeader();
   const insets = useSafeAreaInsets();
@@ -196,7 +202,7 @@ function ThemeSyncWrapper() {
           { backgroundColor: theme.colors.background },
         ]}
       >
-        <StatusBar style={isDark ? 'light' : 'dark'} backgroundColor={theme.colors.background} />
+        <StatusBar style={isDark ? 'light' : 'dark'} />
         <View style={styles.appFrame}>
           {isWeb && !isMobileWeb ? <SchoolRibbon /> : null}
           <View
@@ -206,6 +212,7 @@ function ThemeSyncWrapper() {
               { backgroundColor: theme.colors.background },
             ]}
           >
+            <AppUpdateBanner update={playUpdate} />
             <AuthGate>
               <Stack
                 screenOptions={{
@@ -220,6 +227,8 @@ function ThemeSyncWrapper() {
                 <Stack.Screen name="staff" options={{ headerShown: false }} />
                 <Stack.Screen name="accounts" options={{ headerShown: false }} />
                 <Stack.Screen name="Screen" options={{ headerShown: false }} />
+                <Stack.Screen name="notifications" options={{ headerShown: false }} />
+                <Stack.Screen name="updates" options={{ headerShown: false }} />
               </Stack>
             </AuthGate>
           </View>
@@ -229,6 +238,9 @@ function ThemeSyncWrapper() {
         <NavigationReady />
         {/* Festival poster popup (SuperAdmin-uploaded), once per user per poster */}
         <FestivalPosterGate />
+        {/* SchoolIMS Smart Popup Manager — after dashboard bootstrap, never blocks login */}
+        <PopupQueueProvider />
+        <TourOverlayHost />
 
         <Toast config={toastConfig} />
         {/* Global Animated Splash Screen Overlay removed - now native AnimatedSplash handles this */}
@@ -257,6 +269,7 @@ const styles = StyleSheet.create({
  * Renders nothing visually.
  */
 function NavigationReady() {
+  useAdminScreenUsage();
   const { user, authChecked } = useAuth();
   useAuthGuard();
   useNotifications();

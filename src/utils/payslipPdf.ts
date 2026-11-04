@@ -4,6 +4,14 @@ import { SCHOOL_CONFIG } from '../constants/schoolConfig';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export interface PayslipPdfLine {
+  name: string;
+  kind?: string;
+  quantity?: string | null;
+  amount?: string | null;
+  explanation?: string | null;
+}
+
 export interface PayslipPdfRow {
   id: string;
   month: string;
@@ -12,6 +20,19 @@ export interface PayslipPdfRow {
   deductions: string;
   net: string;
   payment_date?: string | null;
+  amount_in_words?: string | null;
+  per_day_salary?: string | null;
+  calendar_days?: number | null;
+  employment_days?: number | null;
+  lines?: PayslipPdfLine[];
+  attendance?: Record<string, string | number | null> | null;
+  identity?: {
+    classification?: string | null;
+    employmentType?: string | null;
+    campus?: string | null;
+    department?: string | null;
+    bankMasked?: string | null;
+  } | null;
 }
 
 export interface PayslipPdfEmployee {
@@ -91,6 +112,35 @@ function getFileName(payslip: PayslipPdfRow): string {
   return `payslip-${fileSafe(payslip.month)}.pdf`;
 }
 
+export function payslipAttendanceRows(
+  attendance?: Record<string, string | number | null> | null,
+  perDaySalary?: string | null,
+): { label: string; value: string }[] {
+  if (!attendance) return [];
+  const source = attendance.source === 'MANUAL_SUMMARY'
+    ? 'Manual / Third-Party Summary'
+    : String(attendance.sourceLabel || 'SchoolIMS Attendance');
+  const row = (label: string, value: string | number | null | undefined) => ({
+    label,
+    value: value == null || value === '' ? '—' : String(value),
+  });
+  return [
+    row('Attendance source', source),
+    row('Calendar days', attendance.calendarDays),
+    row('Per-day salary', perDaySalary),
+    row('CL entitlement', attendance.paidClEntitlement),
+    row('CL used', attendance.clUsed),
+    row('Excess CL', attendance.excessClDays),
+    row('Non-CL unpaid leave', attendance.nonClUnpaidDays),
+    row('Total lates', attendance.totalLates),
+    row('Permitted lates', attendance.permittedLates),
+    row('Excess lates', attendance.excessLates),
+    row('Late-deduction days', attendance.lateDeductionDays),
+    row('Payroll holiday count', attendance.payrollHolidayCount ?? attendance.officialHolidays),
+    row('Attendance bonus', attendance.attendanceBonusDays == null ? null : `${attendance.attendanceBonusDays} day`),
+  ];
+}
+
 // ─── HTML Template (expo-print / native) ─────────────────────────────────────
 // Premium light "document-grade" payslip. Designed at A4 proportions
 // (794 × 1123 px @ 96dpi) so jsPDF fills the page without vertical squish.
@@ -131,6 +181,35 @@ function buildPayslipHtml({ payslip, employee, school }: PayslipPdfOptions): str
          <td class="t-note">PF, TDS &amp; statutory deductions</td>
          <td class="t-amt neg">- ${deductions}</td>
        </tr>`
+    : '';
+  const lineRows = (payslip.lines || []).map((line) => {
+    const sign = line.kind === 'deduction' ? '-' : '';
+    return `<tr>
+         <td class="t-desc">${escapeHtml(line.name)}</td>
+         <td class="t-note">${escapeHtml(line.explanation).replace(/\n/g, '<br>')}</td>
+         <td class="t-amt ${line.kind === 'deduction' ? 'neg' : 'pos'}">${sign} ${escapeHtml(line.amount)}</td>
+       </tr>`;
+  }).join('');
+  const ledgerRows = lineRows || `<tr>
+              <td class="t-desc">Gross Earnings</td>
+              <td class="t-note">Total payable earnings</td>
+              <td class="t-amt pos">${earnings}</td>
+            </tr>
+            ${deductionsRow}`;
+  const amountWords = payslip.amount_in_words
+    ? `<div class="net-sub">${escapeHtml(payslip.amount_in_words)}</div>`
+    : '<div class="net-sub">Credited for the pay period</div>';
+  const classification = payslip.identity?.classification
+    ? `<div class="row"><span>Classification</span><strong>${escapeHtml(payslip.identity.classification)}</strong></div>`
+    : '';
+  const bank = payslip.identity?.bankMasked
+    ? `<div class="row"><span>Bank</span><strong>${escapeHtml(payslip.identity.bankMasked)}</strong></div>`
+    : '';
+  const attendanceRows = payslipAttendanceRows(payslip.attendance, payslip.per_day_salary).map((item) => (
+    `<tr><td class="t-desc">${escapeHtml(item.label)}</td><td class="t-note">${escapeHtml(item.value)}</td><td class="t-amt"></td></tr>`
+  )).join('');
+  const attendanceSection = attendanceRows
+    ? `<div class="ledger-wrap"><div class="section-label">Attendance</div><table class="ledger"><tbody>${attendanceRows}</tbody></table></div>`
     : '';
 
   const logoBlock = logoUri
@@ -457,6 +536,8 @@ function buildPayslipHtml({ payslip, employee, school }: PayslipPdfOptions): str
           <div class="row"><span>Staff Code</span><strong>${staffCode}</strong></div>
           <div class="row"><span>Designation</span><strong>${designation}</strong></div>
           <div class="row"><span>Department</span><strong>${department}</strong></div>
+          ${classification}
+          ${bank}
           ${empEmail !== '—' ? `<div class="row"><span>Email</span><strong>${empEmail}</strong></div>` : ''}
           ${empPhone !== '—' ? `<div class="row"><span>Phone</span><strong>${empPhone}</strong></div>` : ''}
         </div>
@@ -470,6 +551,8 @@ function buildPayslipHtml({ payslip, employee, school }: PayslipPdfOptions): str
         </div>
       </div>
 
+      ${attendanceSection}
+
       <div class="ledger-wrap">
         <div class="section-label">Salary Breakdown</div>
         <table class="ledger">
@@ -477,12 +560,7 @@ function buildPayslipHtml({ payslip, employee, school }: PayslipPdfOptions): str
             <tr><th>Description</th><th>Details</th><th>Amount</th></tr>
           </thead>
           <tbody>
-            <tr>
-              <td class="t-desc">Gross Earnings</td>
-              <td class="t-note">Total payable earnings</td>
-              <td class="t-amt pos">${earnings}</td>
-            </tr>
-            ${deductionsRow}
+            ${ledgerRows}
           </tbody>
         </table>
       </div>
@@ -492,7 +570,7 @@ function buildPayslipHtml({ payslip, employee, school }: PayslipPdfOptions): str
           <div class="rupee">&#8377;</div>
           <div>
             <div class="net-label">Net Pay</div>
-            <div class="net-sub">Credited for ${month}</div>
+            ${amountWords}
           </div>
         </div>
         <div class="net-value">${net}</div>

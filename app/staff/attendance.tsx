@@ -1,3 +1,4 @@
+import { TourTarget } from '@/src/features/app-tour';
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
     View,
@@ -11,7 +12,6 @@ import {
     ViewStyle,
     LayoutChangeEvent,
 } from 'react-native';
-import { useTranslation } from 'react-i18next';
 import { Ionicons } from '@expo/vector-icons';
 import Animated, {
     FadeInDown,
@@ -32,7 +32,8 @@ import Animated, {
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
 import * as Haptics from 'expo-haptics';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
+import StaffTodayAttendanceCard from '../../src/components/StaffTodayAttendanceCard';
 import { useTheme } from '../../src/hooks/useTheme';
 import StaffHeader from '../../src/components/StaffHeader';
 import ViewAsBanner from '../../src/components/ViewAsBanner';
@@ -253,7 +254,7 @@ function AttendanceRing({ stats, isDark, size, strokeWidth }: { stats: Stats; is
     const percentage = total > 0 ? Math.round((stats.present / total) * 100) : 0;
     const progress = useSharedValue(0);
 
-    const arcs = useMemo(() => buildArcs(stats, circumference), [stats.present, stats.half, stats.absent, circumference]);
+    const arcs = useMemo(() => buildArcs(stats, circumference), [stats, circumference]);
     const trackColor = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(17,24,39,0.06)';
 
     useEffect(() => {
@@ -476,8 +477,8 @@ function AttendanceSkeleton({ isDark, cardBg, cardBorder }: { isDark: boolean; c
 // ─── Main screen ────────────────────────────────────────────────────────────
 export default function StaffMyAttendanceScreen() {
     const { isDark } = useTheme();
-    const { t } = useTranslation();
     const router = useRouter();
+    const params = useLocalSearchParams<{ autoAction?: 'check_in' | 'check_out' }>();
     const { isViewingAsAdmin, viewAsName } = useEffectiveStaffId();
 
     const [refreshing, setRefreshing] = useState(false);
@@ -557,13 +558,13 @@ export default function StaffMyAttendanceScreen() {
 
     // ── Render ───────────────────────────────────────────────────────────────
     return (
-        <View style={[styles.container, { backgroundColor: pageBg }]}>
-            <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={pageBg} />
+        <TourTarget id="screen.staff-attendance.workspace" native><View style={[styles.container, { backgroundColor: pageBg }]}>
+            <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
 
-            <View style={[styles.orb1, { backgroundColor: orb1Color }]} />
-            <View style={[styles.orb2, { backgroundColor: orb2Color }]} />
+            <View pointerEvents="none" style={[styles.orb1, { backgroundColor: orb1Color }]} />
+            <View pointerEvents="none" style={[styles.orb2, { backgroundColor: orb2Color }]} />
 
-            <StaffHeader title="Attendance" scrollY={scrollY} onBack={() => router.back()} showMenuButton={false} />
+            <TourTarget id="screen.staff-attendance.overview" style={styles.headerLayer}><StaffHeader title="My Attendance" scrollY={scrollY} onBack={() => router.back()} showMenuButton={false} /></TourTarget>
             {isViewingAsAdmin && <ViewAsBanner name={viewAsName} />}
 
             {loading && !refreshing ? (
@@ -578,6 +579,14 @@ export default function StaffMyAttendanceScreen() {
                         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={isDark ? '#FFF' : '#7C6FFF'} />
                     }
                 >
+                    {/* ── Today V2 Biometric Attendance Card ────────────────────── */}
+                    <StaffTodayAttendanceCard
+                        isDark={isDark}
+                        isViewingAsAdmin={isViewingAsAdmin}
+                        onAttendanceSuccess={fetchAttendance}
+                        autoAction={params.autoAction}
+                    />
+
                     {/* ── Hero: clay overview card with attendance ring ─────────────── */}
                     <Animated.View
                         entering={FadeInDown.duration(500).springify()}
@@ -676,12 +685,15 @@ export default function StaffMyAttendanceScreen() {
                     )}
                 </Animated.ScrollView>
             )}
-        </View>
+        </View></TourTarget>
     );
 }
 
 const styles = StyleSheet.create({
     container: { flex: 1 },
+    // The header is absolutely positioned. On web every view is its own stacking
+    // context, so the scroll view painted over these buttons and swallowed taps.
+    headerLayer: { zIndex: 20, elevation: 20 },
     orb1: { position: 'absolute', width: 350, height: 350, borderRadius: 175, top: -100, right: -120 },
     orb2: { position: 'absolute', width: 250, height: 250, borderRadius: 125, bottom: 100, left: -100 },
 

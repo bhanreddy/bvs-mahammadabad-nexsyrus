@@ -14,6 +14,7 @@ export const FEATURE_DEFAULTS = {
   'quick.complaints': true,
   'quick.life_values': true,
   'quick.transport': true,
+  'quick.hostel': true,
   'quick.science_projects': true,
   'quick.profile': true,
   'topbar.diary': true,
@@ -23,6 +24,7 @@ export const FEATURE_DEFAULTS = {
   'nav.time_table': true,
   'nav.fees': true,
   'nav.results': true,
+  'nav.calendar': true,
   'nav.home': true,
   'comm.messenger': true,
 } as const;

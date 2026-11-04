@@ -2,13 +2,13 @@
   "expo": {
     "name": "Bhashyam Vidyanikethan School Mohammadabad",
     "slug": "bashyammhbd",
-    "version": "2.1.8",
+    "version": "5.1.9",
     "platforms": [
       "android",
       "ios",
       "web"
     ],
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/images/icon-v2.png",
     "scheme": "schoolims",
     "userInterfaceStyle": "light",
@@ -35,7 +35,6 @@
       "jsEngine": "hermes",
       "versionCode": 1,
       "googleServicesFile": "./google-services.json",
-      "enableShrinkResources": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/icon-v2.png",
         "backgroundColor": "#E6F4FE",
@@ -49,6 +48,9 @@
         "POST_NOTIFICATIONS",
         "WAKE_LOCK",
         "RECEIVE_BOOT_COMPLETED"
+      ],
+      "blockedPermissions": [
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
       ]
     },
     "web": {
@@ -57,7 +59,7 @@
     },
     "notification": {
       "icon": "./assets/images/icon.png",
-      "color": "#FFFFFF"
+      "color": "#3535A8"
     },
     "plugins": [
       [
@@ -70,6 +72,11 @@
               "RNFBApp",
               "RNFBMessaging"
             ]
+          },
+          "android": {
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "extraProguardRules": "# Expo Record options (including SecureStore) use this annotation at runtime.\n# Backport of expo/expo#51206 for Expo Modules Core 3.0.30.\n-keep @interface expo.modules.kotlin.records.Field { *; }"
           }
         }
       ],
@@ -87,13 +94,14 @@
         "expo-notifications",
         {
           "icon": "./assets/images/icon.png",
-          "color": "#FFFFFF",
+          "color": "#3535A8",
           "sounds": [
             "./assets/sounds/attendance_absent_alert.wav",
             "./assets/sounds/notification_default.wav",
             "./assets/sounds/emergency.wav",
             "./assets/sounds/fee_reminder.wav",
             "./assets/sounds/voice_alert.wav",
+            "./assets/sounds/diary_alert.wav",
             "./assets/sounds/bus_present.wav",
             "./assets/sounds/busconfirmation.wav"
           ]
@@ -104,7 +112,16 @@
       "@react-native-community/datetimepicker",
       "@maplibre/maplibre-react-native",
       "./plugins/withManifestMerger.js",
-      "./plugins/withAndroidSounds.js"
+      "./plugins/withAndroidSounds.js",
+      "./plugins/withAndroidWindowCompatibility.js",
+      "./plugins/withAndroidReleaseOptimization.js",
+      "./plugins/withAndroidForegroundAudioOnly.js",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow $(PRODUCT_NAME) to verify staff attendance with Face ID."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
@@ -119,7 +136,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": ""
+        "projectId": "9d4acc12-65e1-42e5-a6b5-95d9a15b501a"
       }
     },
     "owner": "nexsyrus1"

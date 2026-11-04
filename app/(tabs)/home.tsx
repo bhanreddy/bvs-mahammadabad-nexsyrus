@@ -1,3 +1,5 @@
+import { AppTourQuickAction, TourTarget, TourScrollView } from '@/src/features/app-tour';
+import { TOUR_ENABLED } from '@/src/features/app-tour/catalog';
 /**
  * HomeScreen.tsx — Premium v7.3
  * ─────────────────────────────────────────────────────────
@@ -41,13 +43,13 @@ import Animated, {
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import AdminHeaderCard from '../../src/components/AdminHeaderCard';
-import DashboardHero from '../../src/components/DashboardHero';
 import LogoLoader from '../../src/components/LogoLoader';
 import ScreenLayout from '../../src/components/ScreenLayout';
 import StudentHeader from '../../src/components/StudentHeader';
+import StudentHero from '../../src/components/student-hero/StudentHero';
+import { DailySparkWidget } from '../../src/components/content/DailySparkWidget';
+import { ParentAcademicCard } from '../../src/components/academic/ParentAcademicCard';
 import { SCHOOL_CONFIG } from '../../src/constants/schoolConfig';
 import { useAuth } from '../../src/hooks/useAuth';
 import { useFeatures } from '../../src/hooks/useFeatures';
@@ -55,6 +57,8 @@ import type { FeatureKey } from '../../src/config/featureFlags';
 import { useStudentQuery } from '../../src/hooks/useStudentQuery';
 import { useTheme } from '../../src/hooks/useTheme';
 import { patchAccountMetadata } from '../../src/services/accountVault';
+import { notificationInboxService } from '../../src/services/notificationInboxService';
+import { setNotificationUnreadOverride, useNotificationUnreadOverride } from '../../src/services/notificationUnreadStore';
 import { StudentDashboardResponse } from '../../src/services/studentService';
 import { isStudentRole } from '../../src/utils/roleHelpers';
 import { AttendanceSummary } from '../../src/types/models';
@@ -104,13 +108,15 @@ interface HomeTab {
   translationKey?: string;
   subtitleKey: string;
   /** Purpose-built claymorphic scene that explains the destination at a glance. */
-  image: ImageSourcePropType;
+  image?: ImageSourcePropType;
+  /** Code-native fallback for modules that do not need a bitmap illustration. */
+  icon?: keyof typeof Ionicons.glyphMap;
   /** 3-stop gradient: [deep edge, mid base, light top-highlight] */
   grad: [string, string, string];
   /** Single shadow hue — keep tight, don't oversaturate */
   shadow: string;
   /** Feature-flag key gating this quick action (see useFeatures). */
-  feature: FeatureKey;
+  feature?: FeatureKey;
 }
 
 const homeTabs: HomeTab[] = [
@@ -131,6 +137,14 @@ const homeTabs: HomeTab[] = [
     grad: ['#312E81', '#4338CA', '#818CF8'], // Indigo 900, Indigo 700
     shadow: '#3730A3', // Indigo 800
     feature: 'quick.announcements',
+  },
+  {
+    key: 'updates',
+    translationKey: 'studentUpdates.title', title: 'Updates',
+    subtitleKey: 'dashboard.featureSubtitles.broadcast_updates',
+    image: require('../../assets/images/student-actions/updates-clay.png'),
+    grad: ['#4C1D95', '#6D28D9', '#C4B5FD'],
+    shadow: '#5B21B6',
   },
   {
     key: 'complaints',
@@ -158,6 +172,15 @@ const homeTabs: HomeTab[] = [
     grad: ['#78350F', '#B45309', '#FCD34D'], // Amber 900, Amber 700
     shadow: '#92400E', // Amber 800
     feature: 'quick.transport',
+  },
+  {
+    key: 'hostel',
+    translationKey: 'hostel', title: 'Hostel',
+    subtitleKey: 'hostelDetails',
+    image: require('../../assets/images/student-actions/hostel-clay.png'),
+    grad: ['#312E81', '#4F46E5', '#A5B4FC'],
+    shadow: '#4338CA',
+    feature: 'quick.hostel',
   },
   {
     key: 'projects',
@@ -195,20 +218,73 @@ const homeTabs: HomeTab[] = [
     shadow: '#047857',
     feature: 'topbar.lms',
   },
+  {
+    key: 'visitSchool',
+    translationKey: 'studentVisitSchool.title',
+    title: 'Visit School',
+    subtitleKey: 'dashboard.featureSubtitles.visit_school',
+    image: require('../../assets/images/student-actions/visit-school-clay.png'),
+    grad: ['#047857', '#10B981', '#6EE7B7'],
+    shadow: '#065F46',
+  },
+  {
+    key: 'studentPickup',
+    translationKey: 'studentPickupPass.title',
+    title: 'Student Pickup',
+    subtitleKey: 'dashboard.featureSubtitles.student_pickup',
+    image: require('../../assets/images/student-actions/student-pickup-clay.png'),
+    grad: ['#1E1B4B', '#4F46E5', '#A5B4FC'],
+    shadow: '#312E81',
+  },
+  {
+    key: 'authorizedGuardians',
+    translationKey: 'studentGuardians.title',
+    title: 'Guardians',
+    subtitleKey: 'dashboard.featureSubtitles.authorized_guardians',
+    image: require('../../assets/images/student-actions/guardians-clay.png'),
+    grad: ['#0F766E', '#0D9488', '#5EEAD4'],
+    shadow: '#115E59',
+  },
+  {
+    key: 'calendar',
+    translationKey: 'studentCalendar.title',
+    title: 'Academic Calendar',
+    subtitleKey: 'dashboard.featureSubtitles.academic_calendar',
+    image: require('../../assets/images/student-actions/calendar-clay.png'),
+    grad: ['#1E3A8A', '#2563EB', '#93C5FD'],
+    shadow: '#1D4ED8',
+  },
+  {
+    key: 'events',
+    translationKey: 'studentEventDesk.title',
+    title: 'Paperless Event Desk',
+    subtitleKey: 'dashboard.featureSubtitles.event_desk',
+    image: require('../../assets/images/student-actions/event-desk-clay.png'),
+    grad: ['#3B0764', '#7E22CE', '#E9D5FF'],
+    shadow: '#6B21A8',
+  },
 ];
 
 const routeMap: Record<string, string> = {
   diary: '/Screen/diary',
   profile: '/Screen/profile',
   complaints: '/Screen/complaints',
+  helpdesk: '/Screen/helpdesk',
   busmap: '/Screen/busTracker',
   hostel: '/Screen/hostel',
   messages: '/Screen/announcements',
+  updates: '/updates',
   lifeValues: '/Screen/lifeValues',
   projects: '/Screen/scienceProjects',
   test: '/Screen/weekendTest',
   messenger: '/Screen/messages',
   lms: '/Screen/lms',
+  events: '/Screen/events',
+  calendar: '/Screen/calendar',
+  visitSchool: '/Screen/visitSchool',
+  studentPickup: '/Screen/studentPickup',
+  authorizedGuardians: '/Screen/authorizedGuardians',
+  visitorPass: '/Screen/visitorPass',
 };
 
 interface ClayViewProps {
@@ -483,12 +559,18 @@ const FeatureCard = ({ tab, isDark, onPress, cardWidth }: {
 
           <View style={fc.card}>
             <View style={[fc.artStage, { shadowColor: tab.shadow }]}>
-              <Image
-                source={tab.image}
-                style={fc.artImage}
-                resizeMode="cover"
-                accessibilityIgnoresInvertColors
-              />
+              {tab.image ? (
+                <Image
+                  source={tab.image}
+                  style={fc.artImage}
+                  resizeMode="cover"
+                  accessibilityIgnoresInvertColors
+                />
+              ) : (
+                <View style={fc.artIconFallback}>
+                  <Ionicons name={tab.icon || 'apps-outline'} size={42} color="#FFFFFF" />
+                </View>
+              )}
               <LinearGradient
                 colors={['rgba(255,255,255,0.22)', 'rgba(255,255,255,0)']}
                 start={{ x: 0, y: 0 }}
@@ -545,6 +627,12 @@ const fc = StyleSheet.create({
   artImage: {
     width: '100%',
     height: '100%',
+  },
+  artIconFallback: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#4F46E5',
   },
   copy: {
     flex: 1,
@@ -1036,20 +1124,13 @@ const HomeScreen = () => {
   const P = palette(theme);
   const { t } = useTranslation();
   const router = useRouter();
-  const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
   const { user, role } = useAuth();
   const { isEnabled, refresh: refreshFeatures } = useFeatures();
   const visibleQuickActions = homeTabs.filter((tab) => {
-    return isEnabled(tab.feature);
+    return !tab.feature || isEnabled(tab.feature);
   });
 
-  // Pick up admin toggles as soon as the home tab is focused.
-  useFocusEffect(
-    useCallback(() => {
-      refreshFeatures().catch(() => { });
-    }, [refreshFeatures]),
-  );
   const isStudentPortal = isStudentRole(user?.role?.code);
   const isWideWeb = IS_WEB && windowWidth >= 768;
 
@@ -1058,11 +1139,6 @@ const HomeScreen = () => {
   // not a module-level Dimensions snapshot — so 2-up tiles never stretch on desktop.
   const contentW = isWideWeb ? CONTENT_MAX_W : windowWidth;
   const cardW = (contentW - H_PAD * 2 - GAP) / 2;
-  const todayLabel = new Date().toLocaleDateString('en-IN', {
-    weekday: 'long',
-    day: 'numeric',
-    month: 'long',
-  });
 
   const [svgMod, setSvgMod] = useState<ReactNativeSvgModule | null>(null);
   useEffect(() => { void import('react-native-svg').then(setSvgMod); }, []);
@@ -1074,6 +1150,28 @@ const HomeScreen = () => {
     2 * 60 * 1000,
     user?.userId,
     { enabled: !!user?.userId && isStudentPortal, persist: true }
+  );
+  const unreadOverride = useNotificationUnreadOverride();
+  const unreadCount = unreadOverride ?? Number(dash?.unread_notification_count || 0);
+
+  useFocusEffect(
+    useCallback(() => {
+      refreshFeatures().catch(() => { });
+      let cancelled = false;
+      const timer = setTimeout(() => {
+        void refetch().then((data) => {
+          if (cancelled) return;
+          const next = Number((data as StudentDashboardResponse | null)?.unread_notification_count);
+          if (!Number.isFinite(next) || next === 0) {
+            setNotificationUnreadOverride(null);
+          }
+        });
+      }, 350);
+      return () => {
+        cancelled = true;
+        clearTimeout(timer);
+      };
+    }, [refreshFeatures, refetch]),
   );
 
   const student = useMemo(() => dash?.profile ?? null, [dash]);
@@ -1117,23 +1215,12 @@ const HomeScreen = () => {
     : 0;
   const attClr = pct >= 85 ? '#10B981' : pct >= 70 ? '#F59E0B' : '#EF4444';
 
-  // ponytail: pinned solid header — light hero bg needs dark chrome, not scrollY=0 transparent+white text
-  const headerScrollY = useSharedValue(60);
-
-  // StudentHeader is position:absolute, so the hero must reserve its full height or it overlaps the card.
-  // ponytail: mirror StudentHeader's own layout (paddingTop max(insets.top,36) + 40 icon + 16 bottom pad); keep in sync if that header changes.
-  const HEADER_HEIGHT = Math.max(insets.top, 36) + 56;
-
   const FRESH = 36 * 60 * 60 * 1000;
   const isFresh = (n: any) => !!n?.created_at && Date.now() - new Date(n.created_at).getTime() < FRESH;
   const freshNotices = notices.filter(isFresh);
   const staleNotices = notices.filter(n => !isFresh(n));
   const topNotice = freshNotices[0] ?? null;
   const belowNotice = topNotice ? (staleNotices[0] ?? null) : (staleNotices[0] ?? null);
-
-  const hr = new Date().getHours();
-  const gStr = hr < 12 ? t('dashboard.good_morning') : hr < 17 ? t('dashboard.good_afternoon') : t('dashboard.good_evening');
-  const gIco = hr < 12 ? '☀️' : hr < 17 ? '🌤️' : '🌙';
 
   const classSec = useMemo(() => {
     const ce = student?.current_enrollment;
@@ -1161,6 +1248,25 @@ const HomeScreen = () => {
     );
   }, [student, user?.displayName, t]);
 
+  const studentFirstName = useMemo(
+    () => student?.first_name?.trim() || studentFullName.split(/\s+/)[0] || t('studentHome.studentFallback'),
+    [student?.first_name, studentFullName, t],
+  );
+
+  const heroClassLabel = useMemo(() => {
+    const ce = student?.current_enrollment;
+    if (!ce) return t('studentHome.classNA');
+    const cn = ce.class_name || ce.class_code || t('studentHome.classWord');
+    const sec = (ce.section_name || '').replace(/Section\s*/i, '').trim();
+    return `${t('studentHome.classWord')} ${cn}${sec ? ` ${sec}` : ''}`.trim();
+  }, [student, t]);
+
+  const inchargeLabel = useMemo(() => {
+    const teacher = student?.current_enrollment?.class_teacher?.trim();
+    if (!teacher) return null;
+    return `${t('studentHome.incharge', 'Incharge')} · ${teacher}`;
+  }, [student, t]);
+
   useEffect(() => {
     if (!user?.userId || !student) return;
     void patchAccountMetadata(user.userId, {
@@ -1171,11 +1277,11 @@ const HomeScreen = () => {
 
   return (
     <HomeSvgContext.Provider value={svgMod}>
-      <ScreenLayout>
-        <StatusBar style={isDark ? 'light' : 'dark'} backgroundColor="transparent" translucent />
-        <StudentHeader scrollY={headerScrollY} />
+      <ScreenLayout style={{ backgroundColor: SCHOOL_CONFIG.theme.ribbonGradient[0] }}>
+        <StatusBar style="light" />
+        <TourTarget id="screen.home.overview"><StudentHeader continuous /></TourTarget>
 
-        <Animated.ScrollView
+        <TourTarget id="screen.home.workspace" native><TourScrollView
           showsVerticalScrollIndicator={false}
           contentContainerStyle={[S.scroll, { backgroundColor: P.bg }]}
           refreshControl={
@@ -1188,36 +1294,29 @@ const HomeScreen = () => {
           {refreshing && <View style={S.loaderRow}><LogoLoader size={28} /></View>}
 
           {/* ── HERO ── */}
-          <View style={[S.hero, { paddingTop: HEADER_HEIGHT + 14, backgroundColor: P.bg }]}>
+          <View style={[S.hero, { backgroundColor: P.bg }]}>
             <View
               style={[
                 S.heroOuter,
                 {
                   maxWidth: isWideWeb ? CONTENT_MAX_W : undefined,
                   alignSelf: isWideWeb ? 'center' : 'stretch',
-                  paddingHorizontal: isWideWeb ? 0 : H_PAD,
                 },
               ]}
             >
-              <DashboardHero
-                eyebrow={`${gIco}  ${todayLabel}`.toUpperCase()}
-                greeting={gStr}
-                name={studentFullName}
-                subtitle={classSec}
-                stacks
-                showFullName
-                card={
-                  <AdminHeaderCard
-                    compact
-                    embedded
-                    displayName={studentFullName}
-                    roleLabel={classSec}
-                    staffCode={student?.current_enrollment?.roll_number ? `Roll ${student.current_enrollment.roll_number}` : undefined}
-                    photoUrl={student?.photo_url || user?.photoUrl}
-                    portalBadge="STUDENT"
-                    onAccountSwitched={onRefresh}
-                  />
-                }
+              <StudentHero
+                firstName={studentFirstName}
+                classLabel={heroClassLabel}
+                inchargeLabel={inchargeLabel}
+                photoUrl={student?.photo_url || user?.photoUrl}
+                unreadCount={unreadCount}
+                slides={dash?.hero_slides ?? []}
+                stories={dash?.school_stories ?? []}
+                onViewNotifications={() => {
+                  void notificationInboxService.markAllRead();
+                  router.push('/notifications' as any);
+                }}
+                onAccountSwitched={onRefresh}
               />
             </View>
           </View>
@@ -1231,9 +1330,12 @@ const HomeScreen = () => {
             width: '100%',
             alignSelf: 'center',
           }]}>
+            {/* Daily Spark Content Engine Widget */}
+            <DailySparkWidget />
+
             {/* 1. Snapshot — HERO */}
             {isEnabled('home.todays_snapshot') && (
-              <Animated.View entering={FadeInUp.delay(160).duration(700).springify()}>
+              <TourTarget id="student.home.snapshot" native><Animated.View entering={FadeInUp.delay(160).duration(700).springify()}>
                 <SnapshotCard
                   pct={pct} attColor={attClr}
                   todayStatus={todaysStatus}
@@ -1242,8 +1344,9 @@ const HomeScreen = () => {
                     router.push('/Screen/attendance');
                   }}
                 />
-              </Animated.View>
+              </Animated.View></TourTarget>
             )}
+
 
             {/* 2. Fresh notice */}
             {topNotice && (
@@ -1257,8 +1360,8 @@ const HomeScreen = () => {
               </Animated.View>
             )}
 
-            {/* 3. Quick Actions grid — hidden when every action is disabled */}
-            {visibleQuickActions.length > 0 && (
+            {/* 3. Quick Actions — App Tour follows the action cards. */}
+            {(visibleQuickActions.length > 0 || TOUR_ENABLED) && (
               <Animated.View entering={FadeInUp.delay(310).duration(700).springify()}>
                 <SectionLabel
                   text={t('dashboard.quick_actions')}
@@ -1271,7 +1374,7 @@ const HomeScreen = () => {
                         tab={{
                           ...item,
                           title: item.translationKey ? (t(item.translationKey) as string) : item.title,
-                          subtitle: t(item.subtitleKey) as string,
+                          subtitle: item.subtitleKey ? (t(item.subtitleKey) as string) : (item as any).subtitle || 'Gate Access',
                         }}
                         isDark={isDark}
                         cardWidth={cardW}
@@ -1280,12 +1383,13 @@ const HomeScreen = () => {
                     </Animated.View>
                   ))}
                 </View>
+                <AppTourQuickAction portal="student" />
               </Animated.View>
             )}
 
             {/* 4. Class Teacher / Academic Advisor */}
             {isEnabled('home.academic_advisor') && (
-              <Animated.View entering={FadeInUp.delay(460).duration(700).springify()}>
+              <TourTarget id="student.home.advisor" native><Animated.View entering={FadeInUp.delay(460).duration(700).springify()}>
                 <SectionLabel text={t('studentHome.academicAdvisor')} accent="#818CF8" />
                 <TeacherCard
                   name={student?.current_enrollment?.class_teacher || t('studentHome.notAssigned')}
@@ -1303,7 +1407,10 @@ const HomeScreen = () => {
                     }
                   }}
                 />
-              </Animated.View>
+                <View style={{ marginTop: 12 }}>
+                  <ParentAcademicCard studentId={student?.id} />
+                </View>
+              </Animated.View></TourTarget>
             )}
 
             {/* 5. Older notice */}
@@ -1317,7 +1424,7 @@ const HomeScreen = () => {
               </Animated.View>
             )}
           </View>
-        </Animated.ScrollView>
+        </TourScrollView></TourTarget>
       </ScreenLayout>
     </HomeSvgContext.Provider>
   );
@@ -1329,7 +1436,7 @@ const S = StyleSheet.create({
   scroll: { paddingBottom: 80 },
   loaderRow: { alignItems: 'center', paddingVertical: 18 },
 
-  hero: { paddingBottom: 18, overflow: 'hidden' },
+  hero: { paddingBottom: 10, overflow: 'hidden' },
   heroOuter: { width: '100%' },
 
   body: {

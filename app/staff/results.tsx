@@ -1,25 +1,82 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { TourTarget } from '@/src/features/app-tour';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import AppTextInput from '@/src/components/AppTextInput';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, StatusBar, Platform, ViewStyle, Pressable } from 'react-native';
-import KeyboardAwareScreen from '@/components/keyboard/KeyboardAwareScreen';
+import {
+  AccessibilityInfo,
+  FlatList,
+  Keyboard,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  ViewStyle,
+  useWindowDimensions,
+} from 'react-native';
+import { KeyboardAwareScrollView, KeyboardStickyView } from 'react-native-keyboard-controller';
+import { styles as themeInputStyles } from '@/src/theme/styles';
+import { clayTokens } from '@/src/styles/clayTokens';
 import { alertCompat } from '../../src/utils/crossPlatformAlert';
 import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
-import Animated, { FadeInDown, FadeInRight } from 'react-native-reanimated';
+import Animated, {
+  FadeOutDown,
+  FadeInDown,
+  cancelAnimation,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withRepeat,
+  withSpring,
+  withTiming,
+  Easing,
+  type SharedValue,
+} from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Haptics from '../../src/utils/haptics';
 import StaffHeader from '../../src/components/StaffHeader';
-import { staffTabBarReserve } from '../../src/components/StaffFooter';
+import { STAFF_TAB_BAR_HEIGHT, staffTabBarReserve } from '../../src/components/StaffFooter';
 import ViewAsBanner from '../../src/components/ViewAsBanner';
 import { useEffectiveStaffId } from '../../src/hooks/useEffectiveStaffId';
 import { StudentService } from '../../src/services/studentService';
 import { ResultService, TeacherService, TeacherClassAssignment } from '@/src/services/commonServices';
-import { useAuth } from '@/src/hooks/useAuth';
 import { StudentWithDetails } from '@/src/types/schema';
 import { useTheme } from '../../src/hooks/useTheme';
-import { Theme } from '../../src/theme/themes';
+import { Spacing, Theme } from '../../src/theme/themes';
 import LogoLoader from '../../src/components/LogoLoader';
 import StudentPhoto from '../../src/components/StudentPhoto';
+import {
+  AssessmentSchema,
+  ComponentAssessmentInput,
+  ComponentField,
+  ResultRankingMethod,
+  DEFAULT_CONSOLIDATED_MAX,
+  EMPTY_COMPONENT_MARKS,
+  calculateComponentAssessment,
+  calculateConsolidatedAssessment,
+  componentTotalMax,
+  hasAnyComponentMark,
+  isAbsentAssessmentInput,
+  isComponentAssessmentAbsent,
+  isComponentAssessmentComplete,
+  isValidAssessmentInput,
+  numericOrNullComponentMark,
+  normalizeAssessmentInput,
+  parseComponentMaximums,
+  rankAssessmentScores,
+  stringifyComponentMaximums,
+  updateComponentAssessmentInput,
+} from '../../src/utils/assessmentGrading';
+import { nextMarksInput } from '../../src/utils/marksEntryNavigation';
+import { AssessmentDraft, mergeStoredAssessmentMarks, prefillSlipTestFromConsolidated } from '../../src/utils/marksEntryDraft';
+import { SchoolSettingsService } from '../../src/services/schoolSettingsService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types & Constants
@@ -27,53 +84,29 @@ import StudentPhoto from '../../src/components/StudentPhoto';
 
 import { ExamCategory, EXAM_CATEGORIES } from '@/src/constants/examCategories';
 
+const MarksRowSeparator = () => <View style={{ height: 14 }} />;
+
 const EXTRA_SUB_EXAMS_KEY = 'staffExtraSubExams';
+const ASSESSMENT_DRAFTS_KEY = 'staffAssessmentDraftsV1';
 
-// ponytail: local clay helpers — extract if a 3rd staff screen needs them
-function clay(isDark: boolean, raised: 'sm' | 'md' | 'lg' = 'md'): any {
-  const spread = raised === 'lg' ? 24 : raised === 'sm' ? 12 : 18;
-  const dy = raised === 'lg' ? 12 : raised === 'sm' ? 6 : 9;
-  if (Platform.OS === 'web') {
-    const drop = isDark ? 'rgba(0,0,0,0.60)' : 'rgba(166,180,200,0.55)';
-    const light = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,1)';
-    const innerHi = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.9)';
-    const innerLo = isDark ? 'rgba(0,0,0,0.4)' : 'rgba(166,180,200,0.35)';
-    return {
-      boxShadow:
-        `${dy}px ${dy}px ${spread}px ${drop}, ` +
-        `-${dy}px -${dy}px ${spread}px ${light}, ` +
-        `inset 3px 3px 6px ${innerHi}, ` +
-        `inset -3px -3px 6px ${innerLo}`,
-    } as ViewStyle;
-  }
-  return {
-    shadowColor: isDark ? '#000000' : '#94A3B8',
-    shadowOffset: { width: 0, height: dy },
-    shadowOpacity: isDark ? 0.45 : 0.26,
-    shadowRadius: spread,
-    elevation: raised === 'lg' ? 10 : raised === 'sm' ? 4 : 7,
-  };
+interface PersistedAssessmentState {
+  schemas: Record<string, AssessmentSchema>;
+  drafts: Record<string, AssessmentDraft>;
 }
 
-function clayGlow(color: string, raised: 'sm' | 'md' = 'md'): any {
-  const dy = raised === 'sm' ? 4 : 7;
-  const spread = raised === 'sm' ? 10 : 16;
-  if (Platform.OS === 'web') {
-    return {
-      boxShadow:
-        `${dy}px ${dy}px ${spread}px ${color}44, ` +
-        `inset 1.5px 1.5px 3px rgba(255,255,255,0.40), ` +
-        `inset -1.5px -1.5px 3px rgba(0,0,0,0.12)`,
-    } as ViewStyle;
-  }
-  return {
-    shadowColor: color,
-    shadowOffset: { width: 0, height: dy },
-    shadowOpacity: 0.38,
-    shadowRadius: spread,
-    elevation: raised === 'sm' ? 5 : 8,
-  };
-}
+const emptyAssessmentDraft = (consolidatedMaximum = DEFAULT_CONSOLIDATED_MAX): AssessmentDraft => ({
+  consolidatedMaxMarks: String(consolidatedMaximum),
+  componentMaximums: stringifyComponentMaximums(),
+  consolidatedByStudent: {},
+  componentByStudent: {},
+});
+
+const COMPONENT_FIELDS: { field: ComponentField; label: string; shortLabel: string }[] = [
+  { field: 'participation', label: "Children's Participation Responses", shortLabel: 'Participation' },
+  { field: 'writtenWork', label: 'Written Work', shortLabel: 'Written' },
+  { field: 'projectWork', label: 'Project Work', shortLabel: 'Project' },
+  { field: 'slipTest', label: 'Slip Test', shortLabel: 'Slip Test' },
+];
 
 function clayInset(isDark: boolean): any {
   if (Platform.OS === 'web') {
@@ -89,29 +122,1066 @@ function clayInset(isDark: boolean): any {
   };
 }
 
-function clayCard(isDark: boolean, raised: 'sm' | 'md' | 'lg' = 'md'): any {
-  return {
-    backgroundColor: isDark ? '#1A2332' : '#EFF2F9',
-    borderRadius: raised === 'lg' ? 30 : 24,
-    borderWidth: 1,
-    borderColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.7)',
-    ...clay(isDark, raised),
+function PressScale({
+  children,
+  onPress,
+  disabled = false,
+  style,
+  accessibilityLabel,
+}: {
+  children: React.ReactNode;
+  onPress?: () => void;
+  disabled?: boolean;
+  style?: ViewStyle;
+  accessibilityLabel?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+  const reduceMotion = useReducedMotion();
+  const pressScale = useSharedValue(1);
+  const hoverScale = useSharedValue(1);
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: reduceMotion ? 0 : (1 - hoverScale.value) * 160 },
+      { scale: pressScale.value * hoverScale.value },
+    ],
+  }));
+
+  const handlePress = () => {
+    if (!onPress || disabled) return;
+    if (Platform.OS !== 'web') {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+    onPress();
   };
+
+  return (
+    <Pressable
+      disabled={disabled}
+      onPress={handlePress}
+      onPressIn={() => {
+        if (!disabled && !reduceMotion) pressScale.value = withTiming(0.982, { duration: 85 });
+      }}
+      onPressOut={() => {
+        pressScale.value = reduceMotion
+          ? 1
+          : withSpring(1, { damping: 20, stiffness: 340, mass: 0.55 });
+      }}
+      onHoverIn={() => {
+        if (!disabled && !reduceMotion && Platform.OS === 'web') {
+          hoverScale.value = withTiming(1.008, { duration: 150 });
+        }
+      }}
+      onHoverOut={() => {
+        hoverScale.value = reduceMotion ? 1 : withTiming(1, { duration: 150 });
+      }}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityState={{ disabled }}
+      style={[
+        Platform.OS === 'web' && ({ cursor: disabled ? 'not-allowed' : 'pointer' } as object),
+        Platform.OS === 'web' && focused && webFocusRing,
+      ]}
+    >
+      <Animated.View style={[style, animatedStyle]}>{children}</Animated.View>
+    </Pressable>
+  );
 }
 
-function FilterLabelPill({ icon, label, color }: { icon: keyof typeof Ionicons.glyphMap; label: string; color: string }) {
+const webFocusRing = {
+  outlineColor: '#6366F1',
+  outlineOffset: 3,
+  outlineStyle: 'solid',
+  outlineWidth: 2,
+  borderRadius: 18,
+} as object;
+
+interface ResultsFilterOption {
+  id: string;
+  label: string;
+}
+
+function ResultsFilterDropdown({
+  label,
+  value,
+  options,
+  accent,
+  onChange,
+  mutedText,
+  isDark,
+  disabled = false,
+  compact = false,
+  halfWidth = false,
+  dense = false,
+  emptyText = 'No options available',
+  footerAction,
+}: {
+  label: string;
+  value: string | null;
+  options: ResultsFilterOption[];
+  accent: string;
+  onChange: (id: string) => void;
+  mutedText: string;
+  isDark: boolean;
+  disabled?: boolean;
+  compact?: boolean;
+  halfWidth?: boolean;
+  dense?: boolean;
+  emptyText?: string;
+  footerAction?: { label: string; onPress: () => void };
+}) {
+  const [open, setOpen] = useState(false);
+  const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const isCompact = width < 600;
+  const selectedOption = options.find((option) => option.id === value);
+  const displayValue = selectedOption?.label ?? emptyText;
+
   return (
-    <View style={{
-      flexDirection: 'row', alignItems: 'center', gap: 5,
-      alignSelf: 'flex-start', marginBottom: 10,
-      paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10,
-      backgroundColor: `${color}12`, borderWidth: 1, borderColor: `${color}22`,
-    }}>
-      <Ionicons name={icon} size={12} color={color} />
-      <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 1, color, textTransform: 'uppercase' }}>{label}</Text>
+    <View
+      style={[
+        filterDropdownStyles.wrap,
+        compact && filterDropdownStyles.wrapCompact,
+        halfWidth && filterDropdownStyles.wrapHalf,
+        dense && filterDropdownStyles.wrapDense,
+      ]}
+    >
+      {dense ? null : (
+        <Text style={[filterDropdownStyles.label, { color: mutedText }]}>{label}</Text>
+      )}
+      <Pressable
+        disabled={disabled}
+        onPress={() => setOpen(true)}
+        accessibilityRole="button"
+        accessibilityLabel={`${label}: ${displayValue}`}
+        accessibilityState={{ disabled, expanded: open }}
+        style={({ hovered, pressed }) => [
+          filterDropdownStyles.trigger,
+          isDark && filterDropdownStyles.triggerDark,
+          dense && filterDropdownStyles.triggerDense,
+          value && { borderColor: `${accent}66` },
+          (hovered || pressed) && !disabled && { borderColor: accent },
+          disabled && filterDropdownStyles.disabled,
+        ]}
+      >
+        <Text
+          numberOfLines={1}
+          style={[
+            filterDropdownStyles.triggerText,
+            { color: selectedOption ? (isDark ? '#F8FAFC' : '#1E293B') : mutedText },
+          ]}
+        >
+          {displayValue}
+        </Text>
+        <Ionicons name="chevron-down" size={17} color={disabled ? mutedText : accent} />
+      </Pressable>
+
+      <Modal
+        visible={open}
+        transparent
+        animationType={isCompact ? 'slide' : 'fade'}
+        statusBarTranslucent
+        onRequestClose={() => setOpen(false)}
+      >
+        <Pressable
+          style={[
+            filterDropdownStyles.overlay,
+            isCompact && filterDropdownStyles.overlayCompact,
+            isCompact && { paddingBottom: Math.max(insets.bottom, 12) },
+          ]}
+          onPress={() => setOpen(false)}
+        >
+          <Pressable
+            onPress={(event) => event.stopPropagation()}
+            accessibilityViewIsModal
+            style={[
+              filterDropdownStyles.menu,
+              isCompact && filterDropdownStyles.menuCompact,
+              isDark && filterDropdownStyles.menuDark,
+            ]}
+          >
+            <View style={[filterDropdownStyles.menuHeader, isDark && filterDropdownStyles.menuDividerDark]}>
+              <View>
+                <Text style={[filterDropdownStyles.menuEyebrow, { color: accent }]}>FILTER</Text>
+                <Text style={[filterDropdownStyles.menuTitle, { color: isDark ? '#F8FAFC' : '#0F172A' }]}>Select {label.toLowerCase()}</Text>
+              </View>
+              <Pressable onPress={() => setOpen(false)} hitSlop={8} accessibilityLabel={`Close ${label} menu`}>
+                <Ionicons name="close" size={21} color={mutedText} />
+              </Pressable>
+            </View>
+
+            <ScrollView style={filterDropdownStyles.optionList} keyboardShouldPersistTaps="handled">
+              {options.map((option) => {
+                const active = option.id === value;
+                return (
+                  <Pressable
+                    key={option.id}
+                    accessibilityRole="menuitem"
+                    accessibilityState={{ selected: active }}
+                    onPress={() => {
+                      if (Platform.OS !== 'web') void Haptics.selectionAsync();
+                      onChange(option.id);
+                      setOpen(false);
+                    }}
+                    style={({ hovered, pressed }) => [
+                      filterDropdownStyles.option,
+                      isDark && filterDropdownStyles.optionDark,
+                      active && { backgroundColor: `${accent}${isDark ? '24' : '14'}` },
+                      (hovered || pressed) && { borderColor: `${accent}66` },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        filterDropdownStyles.optionText,
+                        { color: active ? accent : (isDark ? '#E2E8F0' : '#334155') },
+                        active && filterDropdownStyles.optionTextActive,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                    {active ? (
+                      <View style={[filterDropdownStyles.checkCircle, { backgroundColor: accent }]}>
+                        <Ionicons name="checkmark" size={13} color="#FFFFFF" />
+                      </View>
+                    ) : null}
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+
+            {footerAction ? (
+              <Pressable
+                onPress={() => {
+                  if (Platform.OS !== 'web') void Haptics.selectionAsync();
+                  setOpen(false);
+                  footerAction.onPress();
+                }}
+                style={[filterDropdownStyles.footerAction, isDark && filterDropdownStyles.menuDividerDark]}
+              >
+                <Ionicons name="add-circle-outline" size={19} color={accent} />
+                <Text style={[filterDropdownStyles.footerActionText, { color: accent }]}>{footerAction.label}</Text>
+              </Pressable>
+            ) : null}
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
+
+const filterDropdownStyles = StyleSheet.create({
+  wrap: {
+    flexGrow: 1,
+    flexBasis: 170,
+    minWidth: 150,
+    gap: 6,
+  },
+  wrapCompact: {
+    width: '100%',
+    minWidth: '100%',
+    flexBasis: '100%',
+  },
+  wrapHalf: {
+    minWidth: 140,
+    flexBasis: '46%',
+  },
+  wrapDense: {
+    flexGrow: 1,
+    flexBasis: 0,
+    minWidth: 0,
+  },
+  label: {
+    paddingLeft: 2,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.7,
+    textTransform: 'uppercase',
+  },
+  trigger: {
+    minHeight: 48,
+    paddingHorizontal: 13,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    borderRadius: clayTokens.radii.input,
+    borderWidth: 1.5,
+    borderColor: 'rgba(76,90,120,0.12)',
+    backgroundColor: clayTokens.colors.inset.light,
+    borderBottomWidth: 1.5,
+    borderBottomColor: 'rgba(76,90,120,0.10)',
+  },
+  triggerDense: {
+    minHeight: 40,
+    paddingHorizontal: 10,
+    borderRadius: 14,
+  },
+  triggerDark: {
+    borderColor: 'rgba(255,255,255,0.10)',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+  },
+  triggerText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: -0.1,
+  },
+  disabled: {
+    opacity: 0.5,
+  },
+  overlay: {
+    flex: 1,
+    padding: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(15,23,42,0.42)',
+  },
+  overlayCompact: {
+    padding: 12,
+    justifyContent: 'flex-end',
+  },
+  menu: {
+    width: '100%',
+    maxWidth: 380,
+    maxHeight: '72%',
+    overflow: 'hidden',
+    borderRadius: 22,
+    backgroundColor: '#F8FAFC',
+    ...Platform.select({
+      web: { boxShadow: '0 22px 60px rgba(15,23,42,0.24)' } as ViewStyle,
+      default: {
+        shadowColor: '#000000',
+        shadowOffset: { width: 0, height: 12 },
+        shadowOpacity: 0.25,
+        shadowRadius: 24,
+        elevation: 16,
+      },
+    }),
+  },
+  menuDark: {
+    backgroundColor: '#182131',
+  },
+  menuCompact: {
+    maxWidth: 560,
+    maxHeight: '82%',
+    borderRadius: 24,
+  },
+  menuHeader: {
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(148,163,184,0.18)',
+  },
+  menuDividerDark: {
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  menuEyebrow: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1,
+    marginBottom: 3,
+  },
+  menuTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    letterSpacing: -0.25,
+  },
+  optionList: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  option: {
+    minHeight: 46,
+    paddingHorizontal: 12,
+    marginVertical: 2,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  optionDark: {
+    backgroundColor: 'rgba(255,255,255,0.025)',
+  },
+  optionText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  optionTextActive: {
+    fontWeight: '800',
+  },
+  checkCircle: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  footerAction: {
+    minHeight: 52,
+    paddingHorizontal: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(148,163,184,0.18)',
+  },
+  footerActionText: {
+    fontSize: 14,
+    fontWeight: '800',
+  },
+});
+
+function SchemaToggle({
+  value,
+  onChange,
+  accent,
+  mutedText,
+  isDark,
+}: {
+  value: AssessmentSchema;
+  onChange: (schema: AssessmentSchema) => void;
+  accent: string;
+  mutedText: string;
+  isDark: boolean;
+}) {
+  const reduceMotion = useReducedMotion();
+  const options = [
+    { key: 'component' as const, label: 'Components', icon: 'grid-outline' as const },
+    { key: 'consolidated' as const, label: 'Consolidated', icon: 'document-text-outline' as const },
+  ];
+  const [trackW, setTrackW] = useState(0);
+  const translateX = useSharedValue(0);
+  const activeIndex = value === 'component' ? 0 : 1;
+  const segmentW = trackW > 0 ? trackW / options.length : 0;
+
+  useEffect(() => {
+    if (segmentW > 0) {
+      translateX.value = reduceMotion
+        ? activeIndex * segmentW
+        : withSpring(activeIndex * segmentW, { damping: 20, stiffness: 220, mass: 0.7 });
+    }
+  }, [activeIndex, reduceMotion, segmentW, translateX]);
+
+  const indicatorStyle = useAnimatedStyle(() => ({ transform: [{ translateX: translateX.value }] }));
+
+  return (
+    <View
+      onLayout={(event) => setTrackW(Math.max(0, event.nativeEvent.layout.width - 8))}
+      style={[schemaToggleStyles.track, isDark && schemaToggleStyles.trackDark]}
+      accessibilityRole="tablist"
+    >
+      {segmentW > 0 ? (
+        <Animated.View
+          style={[
+            schemaToggleStyles.indicator,
+            { width: segmentW, backgroundColor: accent },
+            indicatorStyle,
+          ]}
+        />
+      ) : null}
+      {options.map((option) => {
+        const active = value === option.key;
+        return (
+          <Pressable
+            key={option.key}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: active }}
+            onPress={() => {
+              if (Platform.OS !== 'web') void Haptics.selectionAsync();
+              onChange(option.key);
+            }}
+            style={schemaToggleStyles.option}
+          >
+            <Ionicons name={option.icon} size={15} color={active ? '#FFFFFF' : mutedText} />
+            <Text style={[schemaToggleStyles.label, { color: active ? '#FFFFFF' : mutedText }]}>
+              {option.label}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+const schemaToggleStyles = StyleSheet.create({
+  track: {
+    flex: 1,
+    minWidth: 210,
+    flexDirection: 'row',
+    minHeight: 44,
+    padding: 4,
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(148,163,184,0.14)',
+  },
+  trackDark: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+  },
+  indicator: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    bottom: 4,
+    borderRadius: 11,
+  },
+  option: {
+    flex: 1,
+    minHeight: 36,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    zIndex: 1,
+  },
+  label: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+});
+
+function ProgressTrack({ progress, accent }: { progress: number; accent: string }) {
+  const reduceMotion = useReducedMotion();
+  const clamped = Math.max(0, Math.min(1, progress));
+  const animatedProgress = useSharedValue(clamped);
+
+  useEffect(() => {
+    animatedProgress.value = reduceMotion
+      ? clamped
+      : withTiming(clamped, { duration: 320, easing: Easing.out(Easing.cubic) });
+  }, [animatedProgress, clamped, reduceMotion]);
+
+  const fillStyle = useAnimatedStyle(() => ({
+    transform: [{ scaleX: animatedProgress.value }],
+  }));
+
+  return (
+    <View
+      style={progressStyles.track}
+      accessibilityRole="progressbar"
+      accessibilityValue={{ min: 0, max: 100, now: Math.round(clamped * 100) }}
+    >
+      <Animated.View
+        style={[
+          progressStyles.fill,
+          { backgroundColor: accent },
+          fillStyle,
+        ]}
+      />
+    </View>
+  );
+}
+
+const progressStyles = StyleSheet.create({
+  track: {
+    height: 7,
+    borderRadius: 99,
+    backgroundColor: 'rgba(76,90,120,0.16)',
+    overflow: 'hidden',
+  },
+  fill: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 99,
+    transformOrigin: 'left center',
+  },
+});
+
+function useShimmer() {
+  const reduceMotion = useReducedMotion();
+  const progress = useSharedValue(0);
+  useEffect(() => {
+    if (reduceMotion) {
+      cancelAnimation(progress);
+      progress.value = 0.5;
+      return;
+    }
+    progress.value = withRepeat(
+      withTiming(1, { duration: 1100, easing: Easing.inOut(Easing.ease) }),
+      -1,
+      false,
+    );
+    return () => cancelAnimation(progress);
+  }, [progress, reduceMotion]);
+  return progress;
+}
+
+function SkeletonBlock({
+  shimmer,
+  width,
+  height,
+  radius = 12,
+}: {
+  shimmer: SharedValue<number>;
+  width: number | `${number}%`;
+  height: number;
+  radius?: number;
+}) {
+  const animatedStyle = useAnimatedStyle(() => ({
+    opacity: 0.45 + 0.35 * Math.sin(shimmer.value * Math.PI),
+  }));
+  return (
+    <Animated.View
+      style={[
+        {
+          width,
+          height,
+          borderRadius: radius,
+          backgroundColor: 'rgba(76,90,120,0.14)',
+        },
+        animatedStyle,
+      ]}
+    />
+  );
+}
+
+function StudentsSkeleton() {
+  const shimmer = useShimmer();
+  const { width } = useWindowDimensions();
+  const compact = width < 430;
+  return (
+    <View style={{ paddingHorizontal: 12, paddingBottom: 8, gap: 10 }}>
+      {[0, 1, 2].map((index) => (
+        <View key={index} style={skeletonCard}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <SkeletonBlock shimmer={shimmer} width={44} height={44} radius={14} />
+            <View style={{ flex: 1, gap: 8 }}>
+              <SkeletonBlock shimmer={shimmer} width={compact ? '72%' : 168} height={14} radius={8} />
+              <SkeletonBlock shimmer={shimmer} width={88} height={10} radius={6} />
+            </View>
+            <SkeletonBlock shimmer={shimmer} width={compact ? 64 : 84} height={48} radius={14} />
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+const skeletonCard: ViewStyle = {
+  padding: 14,
+  borderRadius: clayTokens.radii.card,
+  borderWidth: 1,
+  borderColor: 'rgba(148,163,184,0.14)',
+  backgroundColor: 'rgba(255,255,255,0.35)',
+};
+
+type RosterFilter = 'all' | 'remaining' | 'entered' | 'absent';
+type MarksInputKey = `${string}:${ComponentField | 'consolidated'}`;
+
+function MarkField({
+  value,
+  max,
+  label,
+  accessibilityLabel,
+  accent,
+  isDark,
+  filled,
+  onChangeText,
+  onSubmitEditing,
+  onFocus,
+  inputRef,
+  compact = false,
+  hint,
+}: {
+  value: string;
+  max: number | string;
+  label?: string;
+  accessibilityLabel: string;
+  accent: string;
+  isDark: boolean;
+  filled: boolean;
+  onChangeText: (text: string) => void;
+  onSubmitEditing: () => void;
+  onFocus: () => void;
+  inputRef: (node: TextInput | null) => void;
+  compact?: boolean;
+  hint?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+  const fieldAbsent = isAbsentAssessmentInput(value);
+  const invalid = !isValidAssessmentInput(value, Number(max));
+  return (
+    <View style={[markFieldStyles.shell, compact ? markFieldStyles.shellCompact : markFieldStyles.shellScore]}>
+      {label ? (
+        <View style={markFieldStyles.labelRow}>
+          <Text style={markFieldStyles.label} numberOfLines={1}>{label}</Text>
+          <Text style={markFieldStyles.max}>/{max}</Text>
+          <Pressable
+            onPress={() => onChangeText(fieldAbsent ? '' : 'A')}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={fieldAbsent ? `Clear absent for ${label}` : `Mark ${label} absent`}
+            accessibilityState={{ selected: fieldAbsent }}
+          >
+            <Text style={[markFieldStyles.abChip, fieldAbsent && markFieldStyles.abChipActive]}>
+              AB
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
+      <AppTextInput
+        ref={inputRef}
+        accessibilityLabel={accessibilityLabel}
+        style={[
+          markFieldStyles.input,
+          compact && markFieldStyles.inputCompact,
+          isDark && markFieldStyles.inputDark,
+          filled && !fieldAbsent && { borderColor: `${accent}88`, backgroundColor: isDark ? `${accent}22` : `${accent}14` },
+          fieldAbsent && markFieldStyles.inputAbsent,
+          focused && { borderColor: fieldAbsent ? clayTokens.colors.absent.bg : accent },
+          invalid && { borderColor: clayTokens.colors.absent.bg },
+        ]}
+        placeholder="–"
+        placeholderTextColor="#C3C9D6"
+        keyboardType={Platform.OS === 'web' ? 'default' : 'decimal-pad'}
+        inputMode="decimal"
+        autoCapitalize="characters"
+        maxLength={6}
+        value={fieldAbsent ? 'AB' : value}
+        selectTextOnFocus
+        returnKeyType="next"
+        submitBehavior="submit"
+        accessibilityHint={`${hint ? `${hint}. ` : ''}Enter marks from 0 to ${max}, or tap AB if this component was missed`}
+        onChangeText={onChangeText}
+        onSubmitEditing={onSubmitEditing}
+        onFocus={() => {
+          setFocused(true);
+          onFocus();
+        }}
+        onBlur={() => setFocused(false)}
+      />
+      {invalid || hint ? (
+        <Text style={[markFieldStyles.hint, { color: invalid ? clayTokens.colors.absent.bg : accent }]}>
+          {invalid ? `Exceeds maximum ${max}` : hint}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+const markFieldStyles = StyleSheet.create({
+  shell: {
+    flexGrow: 1,
+    minWidth: 72,
+  },
+  shellCompact: {
+    flexBasis: '46%',
+    minWidth: 118,
+  },
+  shellScore: {
+    width: 96,
+    flexGrow: 0,
+    flexShrink: 0,
+  },
+  hint: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 5,
+    textAlign: 'center',
+  },
+  labelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+    paddingHorizontal: 2,
+    gap: 6,
+  },
+  label: {
+    flex: 1,
+    fontSize: 11,
+    fontWeight: '700',
+    color: clayTokens.colors.text.muted,
+    letterSpacing: 0.2,
+  },
+  max: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: clayTokens.colors.text.muted,
+  },
+  abChip: {
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+    color: clayTokens.colors.text.muted,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    overflow: 'hidden',
+    borderRadius: 8,
+  },
+  abChipActive: {
+    color: clayTokens.colors.absent.bg,
+    backgroundColor: clayTokens.colors.brand.roseSoft,
+  },
+  input: {
+    height: 58,
+    paddingVertical: 0,
+    paddingHorizontal: 8,
+    borderWidth: 1.5,
+    borderColor: 'rgba(76,90,120,0.16)',
+    borderRadius: 18,
+    textAlign: 'center',
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: -0.6,
+    color: clayTokens.colors.text.primary,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1.5,
+    borderBottomColor: 'rgba(76,90,120,0.10)',
+  },
+  inputCompact: {
+    height: 48,
+    fontSize: 18,
+  },
+  inputDark: {
+    borderColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: clayTokens.colors.inset.dark,
+    color: '#F8FAFC',
+    borderBottomColor: 'rgba(0,0,0,0.35)',
+  },
+  inputAbsent: {
+    borderColor: 'rgba(210,65,81,0.45)',
+    backgroundColor: clayTokens.colors.brand.roseSoft,
+    color: clayTokens.colors.absent.bg,
+  },
+});
+
+const AVATAR_PALETTE = [
+  { bg: '#EEF0FF', fg: '#4338CA' },
+  { bg: '#E8F1FC', fg: '#1D4ED8' },
+  { bg: '#E7F6F1', fg: '#0F766E' },
+  { bg: '#FBF3E4', fg: '#B45309' },
+  { bg: '#F4E8FF', fg: '#7E22CE' },
+  { bg: '#FDECEC', fg: '#BE123C' },
+] as const;
+
+function avatarTint(name: string) {
+  const index = (name.trim().charCodeAt(0) || 65) % AVATAR_PALETTE.length;
+  return AVATAR_PALETTE[index];
+}
+
+const StudentAssessmentCard = React.memo(function StudentAssessmentCard({
+  student,
+  assessmentSchema,
+  componentMarks,
+  slipTestPrefilled,
+  consolidatedValue,
+  consolidatedMax,
+  componentMaximums,
+  result,
+  rank,
+  attendance,
+  rankingMethod,
+  entered,
+  isAbsent,
+  isFocused = false,
+  accent,
+  isDark,
+  styles,
+  onComponentMarkChange,
+  onConsolidatedMarkChange,
+  onToggleAbsent,
+  onFocusField,
+  onSubmitField,
+  registerInput,
+}: {
+  student: StudentWithDetails;
+  assessmentSchema: AssessmentSchema;
+  componentMarks: ComponentAssessmentInput;
+  slipTestPrefilled: boolean;
+  consolidatedValue: string;
+  consolidatedMax: string;
+  componentMaximums: Record<ComponentField, number>;
+  result: { obtained: number; maximum: number; percentage: number; grade: string; gpa: number; rank: number };
+  rank: number | undefined;
+  attendance: number | null | undefined;
+  rankingMethod: ResultRankingMethod;
+  entered: boolean;
+  isAbsent: boolean;
+  isFocused?: boolean;
+  accent: string;
+  isDark: boolean;
+  styles: Record<string, any>;
+  onComponentMarkChange: (studentId: string, field: ComponentField, text: string) => void;
+  onConsolidatedMarkChange: (studentId: string, text: string) => void;
+  onToggleAbsent: (studentId: string) => void;
+  onFocusField: (studentId: string, field: ComponentField | 'consolidated') => void;
+  onSubmitField: (studentId: string, field: ComponentField | 'consolidated') => void;
+  registerInput: (key: MarksInputKey, node: TextInput | null) => void;
+}) {
+  const displayName = student.person.display_name ??
+    `${student.person.first_name} ${student.person.last_name}`;
+  const componentResult = calculateComponentAssessment(componentMarks, componentMaximums);
+  const tint = avatarTint(displayName);
+  const railColor = isAbsent
+    ? clayTokens.colors.absent.bg
+    : entered
+      ? accent
+      : (isDark ? 'rgba(255,255,255,0.18)' : 'rgba(148,163,184,0.55)');
+
+  return (
+    <View
+      style={[
+        styles.assessmentStudentShadow,
+        Platform.OS === 'web' && ({
+          boxShadow: isDark
+            ? '0 12px 28px -12px rgba(0,0,0,0.55)'
+            : '0 16px 32px -18px rgba(76,90,120,0.45), 0 2px 6px rgba(76,90,120,0.05)',
+        } as object),
+      ]}
+    >
+    <View style={[
+      styles.assessmentStudentCard,
+      isAbsent && styles.assessmentStudentCardAbsent,
+      isFocused && { borderColor: accent },
+      entered && !isAbsent && !isFocused && { borderColor: `${accent}44` },
+    ]}>
+      <View style={[styles.statusRail, { backgroundColor: railColor }]} />
+      <View style={styles.assessmentStudentHeader}>
+        <View style={[styles.studentAvatar, { backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : tint.bg }]}>
+          <StudentPhoto
+            photoUrl={student.person.photo_url}
+            displayName={displayName}
+            size={44}
+            borderRadius={16}
+            fallbackTextStyle={[styles.studentAvatarText, { color: isDark ? '#E2E8F0' : tint.fg }]}
+          />
+        </View>
+        <View style={styles.studentInfo}>
+          <Text style={styles.studentName} numberOfLines={1}>{displayName}</Text>
+          <View style={styles.rollPill}>
+            <Text style={styles.studentRoll} numberOfLines={1}>#{student.admission_no}</Text>
+          </View>
+        </View>
+        {entered && !isAbsent ? (
+          <View style={[styles.gradeBadge, { backgroundColor: `${accent}18` }]}>
+            <Text style={[styles.gradeBadgeText, { color: accent }]}>{result.grade}</Text>
+          </View>
+        ) : null}
+        <PressScale
+          onPress={() => onToggleAbsent(student.id)}
+          accessibilityLabel={isAbsent ? `Clear absent for ${displayName}` : `Mark ${displayName} absent`}
+        >
+          <View style={[styles.absentChip, isAbsent && styles.absentChipActive]}>
+            <Ionicons
+              name={isAbsent ? 'close-circle' : 'remove-circle-outline'}
+              size={14}
+              color={isAbsent ? '#FFFFFF' : (isDark ? '#94A3B8' : '#7B8499')}
+            />
+            <Text style={[styles.absentChipText, isAbsent && styles.absentChipTextActive]}>
+              Absent
+            </Text>
+          </View>
+        </PressScale>
+      </View>
+
+      <View style={styles.cardDivider} />
+
+      {assessmentSchema === 'component' ? (
+        <View style={styles.componentGrid}>
+          {COMPONENT_FIELDS.map(({ field, label, shortLabel }) => (
+            <MarkField
+              key={field}
+              compact
+              value={componentMarks[field]}
+              max={componentMaximums[field]}
+              label={shortLabel}
+              hint={field === 'slipTest' && slipTestPrefilled ? 'Copied from consolidated' : undefined}
+              accessibilityLabel={`${label}, maximum ${componentMaximums[field]}`}
+              accent={accent}
+              isDark={isDark}
+              filled={componentMarks[field] !== ''}
+              onChangeText={(text) => onComponentMarkChange(student.id, field, text)}
+              onSubmitEditing={() => onSubmitField(student.id, field)}
+              onFocus={() => onFocusField(student.id, field)}
+              inputRef={(node) => registerInput(`${student.id}:${field}`, node)}
+            />
+          ))}
+        </View>
+      ) : (
+        <View style={styles.consolidatedEntryRow}>
+          <View style={styles.consolidatedCopy}>
+            <Text style={styles.consolidatedLabel}>Marks obtained</Text>
+            <Text style={styles.consolidatedHint}>Out of {consolidatedMax || DEFAULT_CONSOLIDATED_MAX}</Text>
+          </View>
+          <MarkField
+            value={consolidatedValue}
+            max={consolidatedMax || DEFAULT_CONSOLIDATED_MAX}
+            accessibilityLabel={`Marks obtained by ${displayName}`}
+            accent={accent}
+            isDark={isDark}
+            filled={consolidatedValue !== ''}
+            onChangeText={(text) => onConsolidatedMarkChange(student.id, text)}
+            onSubmitEditing={() => onSubmitField(student.id, 'consolidated')}
+            onFocus={() => onFocusField(student.id, 'consolidated')}
+            inputRef={(node) => registerInput(`${student.id}:consolidated`, node)}
+          />
+        </View>
+      )}
+
+      {entered ? (
+        <View style={styles.scoreStrip}>
+          <View style={[styles.scoreChip, styles.scoreChipStrong]}>
+            <Text style={styles.scoreChipValue}>
+              {isAbsent ? 'Absent' : `${result.obtained}/${result.maximum}`}
+            </Text>
+          </View>
+          {!isAbsent ? (
+            <>
+              <View style={styles.scoreChip}>
+                <Text style={styles.scoreChipMuted}>{result.percentage.toFixed(1)}%</Text>
+              </View>
+              <View style={styles.scoreChip}>
+                <Text style={styles.scoreChipMuted}>
+                  {assessmentSchema === 'component' ? `GPA ${result.gpa.toFixed(1)}` : result.grade}
+                </Text>
+              </View>
+              {assessmentSchema === 'component' ? (
+                <View style={styles.scoreChip}>
+                  <Text style={styles.scoreChipMuted}>{componentResult.weightage.toFixed(1)}/20</Text>
+                </View>
+              ) : null}
+            </>
+          ) : null}
+          <View style={[styles.scoreChip, { backgroundColor: `${accent}16` }]}>
+            <Text style={[styles.scoreChipValue, { color: accent }]}>#{rank ?? '—'}</Text>
+          </View>
+          {rankingMethod === 'attendance_tiebreak' ? (
+            <View style={styles.scoreChip}>
+              <Text style={styles.scoreChipMuted}>
+                {attendance == null ? 'Att —' : `${Number(attendance).toFixed(0)}% att`}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      ) : (
+        <View style={styles.cardStatusRow}>
+          <View style={[styles.pendingDot, { backgroundColor: railColor }]} />
+          <Text style={styles.pendingHint} numberOfLines={2}>
+            {assessmentSchema === 'component'
+              ? `Still to enter: ${COMPONENT_FIELDS.filter(({ field }) => componentMarks[field] === '').map(({ shortLabel }) => shortLabel).join(', ')}`
+              : 'Waiting for a score'}
+          </Text>
+        </View>
+      )}
+    </View>
+    </View>
+  );
+}, (previous, next) => {
+  const { result: previousResult, ...previousProps } = previous;
+  const { result: nextResult, ...nextProps } = next;
+  return (Object.keys(previousProps) as (keyof typeof previousProps)[])
+    .every((key) => previousProps[key] === nextProps[key]) &&
+    (Object.keys(previousResult) as (keyof typeof previousResult)[])
+      .every((key) => previousResult[key] === nextResult[key]);
+});
 
 function parseExamIndex(name: string, prefix: string): number | null {
   const escaped = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -188,14 +1258,38 @@ function getUniqueClassSections(
 export default function UploadMarks() {
   const { theme, isDark } = useTheme();
   const { isViewingAsAdmin, viewAsName } = useEffectiveStaffId();
-  const styles = React.useMemo(() => getStyles(theme, isDark), [theme, isDark]);
+  const { width: viewportWidth } = useWindowDimensions();
+  const reduceMotion = useReducedMotion();
+  const isPhone = viewportWidth < 600;
+  const studentColumns = viewportWidth >= 1080 ? 2 : 1;
+  const dashboardColumns = viewportWidth >= 1180 ? 3 : viewportWidth >= 720 ? 2 : 1;
+  const styles = React.useMemo(
+    () => getStyles(theme, isDark, dashboardColumns, isPhone, studentColumns),
+    [theme, isDark, dashboardColumns, isPhone, studentColumns]
+  );
 
   // ── view state ──────────────────────────────────────────────────────────────
   const [selectedCategory, setSelectedCategory] = useState<ExamCategory | null>(null);
   const [selectedSubExam, setSelectedSubExam] = useState('');
-  const [maxMarks, setMaxMarks] = useState('100');
   const [extraSubExams, setExtraSubExams] = useState<Record<string, string[]>>({});
   const [dbSubExams, setDbSubExams] = useState<string[]>([]);
+  const [assessmentSchemas, setAssessmentSchemas] = useState<Record<string, AssessmentSchema>>({});
+  const [assessmentDrafts, setAssessmentDrafts] = useState<Record<string, AssessmentDraft>>({});
+  const [assessmentStorageReady, setAssessmentStorageReady] = useState(false);
+  const [rankingMethod, setRankingMethod] = useState<ResultRankingMethod>('competition');
+  const [attendanceByStudent, setAttendanceByStudent] = useState<Record<string, number | null>>({});
+  const [studentQuery, setStudentQuery] = useState('');
+  const [rosterFilter, setRosterFilter] = useState<RosterFilter>('all');
+  const [setupCollapsed, setSetupCollapsed] = useState(false);
+  const [focusedStudentId, setFocusedStudentId] = useState<string | null>(null);
+  const marksListRef = useRef<FlatList<StudentWithDetails>>(null);
+  const pendingFocusRef = useRef<MarksInputKey | null>(null);
+  const marksHeaderHeightRef = useRef(0);
+  const pendingScrollRef = useRef<MarksInputKey | null>(null);
+  const scrollRetryCountRef = useRef(0);
+  const focusRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [focusedField, setFocusedField] = useState<ComponentField | 'consolidated'>('consolidated');
+  const inputRefs = useRef<Partial<Record<MarksInputKey, TextInput | null>>>({});
 
   // ── assignment / filter state ────────────────────────────────────────────────
   const [assignments, setAssignments] = useState<TeacherClassAssignment[]>([]);
@@ -236,11 +1330,14 @@ export default function UploadMarks() {
   );
 
   // ── data state ───────────────────────────────────────────────────────────────
-  const [marks, setMarks] = useState<{ [key: string]: string; }>({});
   const [students, setStudents] = useState<StudentWithDetails[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  const { user } = useAuth();
+  const [studentsLoading, setStudentsLoading] = useState(false);
+  const [marksLoading, setMarksLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const studentsRequestId = useRef(0);
+  const marksRequestId = useRef(0);
+  const dataLoading = studentsLoading || marksLoading;
 
   const activeSubExams = useMemo(() => {
     if (!selectedCategory) return [];
@@ -251,10 +1348,134 @@ export default function UploadMarks() {
     );
   }, [selectedCategory, extraSubExams, dbSubExams]);
 
-  const filledCount = useMemo(
-    () => Object.values(marks).filter((v) => v !== '' && v != null).length,
-    [marks],
+  const schemaInstanceKey = useMemo(() => {
+    if (!selectedCategory || !selectedClassSectionId || !selectedSubExam) return '';
+    return `${selectedClassSectionId}:${selectedCategory.key}:${selectedSubExam}`;
+  }, [selectedCategory, selectedClassSectionId, selectedSubExam]);
+
+  const draftKey = useMemo(() => {
+    if (!schemaInstanceKey || !selectedSubjectId) return '';
+    return `${schemaInstanceKey}:${selectedSubjectId}`;
+  }, [schemaInstanceKey, selectedSubjectId]);
+
+  const assessmentSchema = assessmentSchemas[schemaInstanceKey] ?? 'consolidated';
+  const defaultConsolidatedMaximum = selectedCategory?.key === 'sa_results'
+    ? 80
+    : DEFAULT_CONSOLIDATED_MAX;
+  const currentDraft = useMemo(() => {
+    const raw = assessmentDrafts[draftKey] ?? emptyAssessmentDraft(defaultConsolidatedMaximum);
+    return {
+      ...raw,
+      componentMaximums: {
+        ...stringifyComponentMaximums(),
+        ...(raw.componentMaximums ?? {}),
+      },
+    };
+  }, [assessmentDrafts, defaultConsolidatedMaximum, draftKey]);
+  const componentMaximums = useMemo(
+    () => parseComponentMaximums(currentDraft.componentMaximums),
+    [currentDraft.componentMaximums],
   );
+  const componentTotal = componentTotalMax(componentMaximums);
+
+  useEffect(() => {
+    if (!assessmentStorageReady || assessmentSchema !== 'component' || !draftKey) return;
+    setAssessmentDrafts((previous) => {
+      const draft = previous[draftKey];
+      if (!draft) return previous;
+      const next = prefillSlipTestFromConsolidated(draft);
+      return next === draft ? previous : { ...previous, [draftKey]: next };
+    });
+  }, [assessmentDrafts, assessmentSchema, assessmentStorageReady, draftKey]);
+
+  const prefilledSlipTestCount = students.filter((student) => {
+    const copied = currentDraft.prefilledSlipTestByStudent?.[student.id];
+    return copied != null && currentDraft.componentByStudent[student.id]?.slipTest === copied;
+  }).length;
+
+  const filledCount = useMemo(() => {
+    return students.filter((student) => {
+      if (assessmentSchema === 'component') {
+        const entry = currentDraft.componentByStudent[student.id] ?? EMPTY_COMPONENT_MARKS;
+        return isComponentAssessmentAbsent(entry) || isComponentAssessmentComplete(entry);
+      }
+      return (currentDraft.consolidatedByStudent[student.id] ?? '') !== '';
+    }).length;
+  }, [assessmentSchema, currentDraft, students]);
+
+  const fillPercent = students.length === 0 ? 0 : filledCount / students.length;
+  const remainingCount = Math.max(0, students.length - filledCount);
+  const absentCount = useMemo(() => {
+    return students.filter((student) => {
+      if (assessmentSchema === 'component') {
+        return isComponentAssessmentAbsent(currentDraft.componentByStudent[student.id] ?? EMPTY_COMPONENT_MARKS);
+      }
+      return isAbsentAssessmentInput(currentDraft.consolidatedByStudent[student.id]);
+    }).length;
+  }, [assessmentSchema, currentDraft, students]);
+  const contextLabel = selectedAssignment
+    ? `${selectedAssignment.class_name}-${selectedAssignment.section_name} · ${selectedAssignment.subject_name} · ${selectedSubExam}`
+    : 'Choose class, subject and exam';
+
+  const visibleStudents = useMemo(() => {
+    const query = studentQuery.trim().toLowerCase();
+    if (!query && rosterFilter === 'all') return students;
+    return students.filter((student) => {
+      const displayName = (student.person.display_name ??
+        `${student.person.first_name} ${student.person.last_name}`).toLowerCase();
+      const roll = String(student.admission_no ?? '').toLowerCase();
+      if (query && !displayName.includes(query) && !roll.includes(query)) return false;
+
+      const componentMarks = currentDraft.componentByStudent[student.id] ?? EMPTY_COMPONENT_MARKS;
+      const isAbsent = assessmentSchema === 'component'
+        ? isComponentAssessmentAbsent(componentMarks)
+        : isAbsentAssessmentInput(currentDraft.consolidatedByStudent[student.id]);
+      const entered = assessmentSchema === 'component'
+        ? isAbsent || isComponentAssessmentComplete(componentMarks)
+        : (currentDraft.consolidatedByStudent[student.id] ?? '') !== '';
+
+      // Keep the active card mounted until the teacher explicitly moves on.
+      if (student.id === focusedStudentId) return true;
+      if (rosterFilter === 'remaining') return !entered;
+      if (rosterFilter === 'entered') return entered;
+      if (rosterFilter === 'absent') return isAbsent;
+      return true;
+    });
+  }, [assessmentSchema, currentDraft, focusedStudentId, rosterFilter, studentQuery, students]);
+
+  const studentResults = useMemo(() => {
+    return students.reduce<Record<string, ReturnType<typeof calculateConsolidatedAssessment> & { rank: number }>>(
+      (acc, student) => {
+        const result = assessmentSchema === 'component'
+          ? calculateComponentAssessment(
+              currentDraft.componentByStudent[student.id] ?? EMPTY_COMPONENT_MARKS,
+              componentMaximums,
+            )
+          : calculateConsolidatedAssessment(
+              currentDraft.consolidatedByStudent[student.id] ?? '',
+              currentDraft.consolidatedMaxMarks,
+            );
+        acc[student.id] = { ...result, rank: 0 };
+        return acc;
+      },
+      {},
+    );
+  }, [assessmentSchema, componentMaximums, currentDraft, students]);
+
+  const studentRanks = useMemo(() => {
+    const entered = students.flatMap((student) => {
+      const isEntered = assessmentSchema === 'component'
+        ? isComponentAssessmentAbsent(currentDraft.componentByStudent[student.id] ?? EMPTY_COMPONENT_MARKS) ||
+          isComponentAssessmentComplete(currentDraft.componentByStudent[student.id] ?? EMPTY_COMPONENT_MARKS)
+        : (currentDraft.consolidatedByStudent[student.id] ?? '') !== '';
+      return isEntered ? [{
+        id: student.id,
+        score: studentResults[student.id].percentage,
+        attendancePercentage: attendanceByStudent[student.id],
+      }] : [];
+    });
+    return rankAssessmentScores(entered, rankingMethod);
+  }, [assessmentSchema, attendanceByStudent, currentDraft, rankingMethod, studentResults, students]);
 
   const accentColor = selectedCategory?.color ?? '#7C6FFF';
 
@@ -274,6 +1495,57 @@ export default function UploadMarks() {
         // ignore corrupt storage
       }
     });
+  }, []);
+
+  useEffect(() => {
+    SchoolSettingsService.getSettings()
+      .then((settings) => {
+        const saved = settings.result_ranking_method;
+        setRankingMethod(saved === 'attendance_tiebreak' || saved === 'dense' ? saved : 'competition');
+      })
+      .catch(() => {
+        // Backend and client both default safely to competition ranking.
+      });
+  }, []);
+
+  useEffect(() => {
+    AsyncStorage.getItem(ASSESSMENT_DRAFTS_KEY)
+      .then((raw) => {
+        if (!raw) return;
+        const parsed = JSON.parse(raw) as PersistedAssessmentState;
+        setAssessmentSchemas(parsed.schemas ?? {});
+        setAssessmentDrafts(parsed.drafts ?? {});
+      })
+      .catch(() => {
+        // A corrupt local draft must never block marks entry.
+      })
+      .finally(() => setAssessmentStorageReady(true));
+  }, []);
+
+  useEffect(() => {
+    if (!assessmentStorageReady) return;
+    const snapshot: PersistedAssessmentState = {
+      schemas: assessmentSchemas,
+      drafts: assessmentDrafts,
+    };
+    const persistenceTimer = setTimeout(() => {
+      AsyncStorage.setItem(ASSESSMENT_DRAFTS_KEY, JSON.stringify(snapshot)).catch(() => {
+        // Server persistence remains available even if local storage is full.
+      });
+    }, 350);
+    return () => clearTimeout(persistenceTimer);
+  }, [assessmentDrafts, assessmentSchemas, assessmentStorageReady]);
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSubscription = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
+    const hideSubscription = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
   }, []);
 
   useEffect(() => {
@@ -297,7 +1569,7 @@ export default function UploadMarks() {
     return () => {
       cancelled = true;
     };
-  }, [selectedCategory?.key]);
+  }, [selectedCategory]);
 
   useEffect(() => {
     if (!selectedCategory || activeSubExams.length === 0) return;
@@ -305,6 +1577,19 @@ export default function UploadMarks() {
       setSelectedSubExam(activeSubExams[0]);
     }
   }, [activeSubExams, selectedCategory, selectedSubExam]);
+
+  useEffect(() => {
+    setSetupCollapsed(false);
+    setStudentQuery('');
+    setRosterFilter('all');
+    setFocusedStudentId(null);
+  }, [selectedCategory?.key]);
+
+  useEffect(() => {
+    if (!studentsLoading && students.length > 0 && selectedAssignment && selectedSubExam) {
+      setSetupCollapsed(true);
+    }
+  }, [selectedAssignment, selectedSubExam, students.length, studentsLoading]);
 
   // 1. Load assignments on mount
   useEffect(() => {
@@ -316,7 +1601,7 @@ export default function UploadMarks() {
     if (classSections.length > 0 && !selectedClassSectionId) {
       setSelectedClassSectionId(classSections[0].class_section_id);
     }
-  }, [classSections]);
+  }, [classSections, selectedClassSectionId]);
 
   // 3. Auto-select first subject when class-section changes
   useEffect(() => {
@@ -327,63 +1612,72 @@ export default function UploadMarks() {
     }
   }, [selectedClassSectionId, availableSubjects]);
 
-  // 4. Fetch students when resolved assignment changes
-  useEffect(() => {
-    if (selectedCategory && selectedAssignment) {
-      fetchStudents();
-    } else {
-      setStudents([]);
-    }
-  }, [selectedCategory, selectedAssignment]);
-
-  // 5. Fetch existing marks when sub-exam or assignment changes
-  useEffect(() => {
-    if (selectedCategory && selectedAssignment && selectedSubExam) {
-      fetchExistingMarks();
-    }
-  }, [selectedCategory, selectedAssignment, selectedSubExam]);
-
   // ── data fetchers ─────────────────────────────────────────────────────────────
 
   const fetchAssignments = async () => {
     try {
       const data = await TeacherService.getMyClasses();
       setAssignments(data);
-    } catch (error) {
-
+    } catch {
       alertCompat('Error', 'Could not load your assigned classes.');
     }
   };
 
-  const fetchExistingMarks = async () => {
+  const fetchExistingMarks = useCallback(async () => {
     if (!selectedAssignment || !selectedCategory || !selectedSubExam) return;
+    const requestId = ++marksRequestId.current;
     try {
-      setLoading(true);
+      setMarksLoading(true);
       const data = await ResultService.getMarks({
         class_section_id: selectedAssignment.class_section_id,
         exam_category: selectedCategory.key,
         sub_exam: selectedSubExam,
         subject_id: selectedAssignment.subject_id
       });
-      setMaxMarks(data.max_marks ? data.max_marks.toString() : '100');
-      const newMarks: { [key: string]: string; } = {};
-      if (data.marks?.length > 0) {
-        data.marks.forEach((m: any) => {
-          newMarks[m.student_id] = m.marks_obtained.toString();
-        });
-      }
-      setMarks(newMarks);
-    } catch (error) {
+      if (requestId !== marksRequestId.current) return;
+      const serverSchema = data.assessment_schema ?? 'consolidated';
+      setAttendanceByStudent(Object.fromEntries(
+        (data.attendance ?? []).map((row) => [
+          row.student_id,
+          row.attendance_percentage == null ? null : Number(row.attendance_percentage),
+        ]),
+      ));
+      setAssessmentSchemas((previous) => ({
+        ...previous,
+        [schemaInstanceKey]: previous[schemaInstanceKey] ?? serverSchema,
+      }));
+      setAssessmentDrafts((previous) => {
+        const existing = previous[draftKey] ?? emptyAssessmentDraft(defaultConsolidatedMaximum);
+        const merged = mergeStoredAssessmentMarks(existing, data.marks ?? [], serverSchema);
 
+        return {
+          ...previous,
+          [draftKey]: {
+            ...merged,
+            consolidatedMaxMarks: String(data.consolidated_max_marks ?? data.max_marks ?? defaultConsolidatedMaximum),
+            componentMaximums: stringifyComponentMaximums(parseComponentMaximums({
+              participation: data.component_maximums?.participation,
+              writtenWork: data.component_maximums?.written_work,
+              projectWork: data.component_maximums?.project_work,
+              slipTest: serverSchema === 'consolidated' && Object.keys(existing.prefilledSlipTestByStudent ?? {}).length > 0
+                ? existing.componentMaximums.slipTest
+                : data.component_maximums?.slip_test,
+            })),
+          },
+        };
+      });
+    } catch {
     } finally {
-      setLoading(false);
+      if (requestId === marksRequestId.current) setMarksLoading(false);
     }
-  };
+  }, [defaultConsolidatedMaximum, draftKey, schemaInstanceKey, selectedAssignment, selectedCategory, selectedSubExam]);
 
-  const fetchStudents = async () => {
+  const fetchStudents = useCallback(async () => {
     if (!selectedAssignment) return;
+    const requestId = ++studentsRequestId.current;
     try {
-      setLoading(true);
+      setStudentsLoading(true);
+      setStudents([]);
       const response = await StudentService.getAll<StudentWithDetails>({
         class_id: selectedAssignment.class_id,
         section_id: selectedAssignment.section_id,
@@ -391,31 +1685,209 @@ export default function UploadMarks() {
         sort_by: 'roll_number',
         sort_order: 'asc',
       });
+      if (requestId !== studentsRequestId.current) return;
       setStudents(response.data);
-    } catch (error) {
-
+    } catch {
       alertCompat('Error', 'Failed to fetch students');
     } finally {
-      setLoading(false);
+      if (requestId === studentsRequestId.current) setStudentsLoading(false);
     }
-  };
+  }, [selectedAssignment]);
+
+  // 4. Fetch students when resolved assignment changes
+  useEffect(() => {
+    if (selectedCategory && selectedAssignment) {
+      fetchStudents();
+    } else {
+      studentsRequestId.current += 1;
+      setStudentsLoading(false);
+      setStudents([]);
+    }
+  }, [fetchStudents, selectedAssignment, selectedCategory]);
+
+  // 5. Fetch existing marks when sub-exam or assignment changes
+  useEffect(() => {
+    if (assessmentStorageReady && selectedCategory && selectedAssignment && selectedSubExam) {
+      fetchExistingMarks();
+    } else {
+      marksRequestId.current += 1;
+      setMarksLoading(false);
+    }
+  }, [assessmentStorageReady, fetchExistingMarks, selectedAssignment, selectedCategory, selectedSubExam]);
 
   // ── handlers ──────────────────────────────────────────────────────────────────
 
   const handleBackToDashboard = () => {
     setSelectedCategory(null);
-    setMarks({});
+  };
+
+  const updateCurrentDraft = useCallback((updater: (draft: AssessmentDraft) => AssessmentDraft) => {
+    if (!draftKey) return;
+    setAssessmentDrafts((previous) => ({
+      ...previous,
+      [draftKey]: updater(previous[draftKey] ?? emptyAssessmentDraft(defaultConsolidatedMaximum)),
+    }));
+  }, [defaultConsolidatedMaximum, draftKey]);
+
+  const handleSchemaChange = (schema: AssessmentSchema) => {
+    if (!schemaInstanceKey) return;
+    setAssessmentSchemas((previous) => ({ ...previous, [schemaInstanceKey]: schema }));
   };
 
   const handleMaxMarksChange = (text: string) => {
-    if (/^\d*$/.test(text)) setMaxMarks(text);
+    if (!/^\d{0,3}$/.test(text)) return;
+    const maximum = Number(text);
+    if (text !== '' && (maximum < 1 || maximum > 999)) return;
+    updateCurrentDraft((draft) => ({ ...draft, consolidatedMaxMarks: text }));
   };
 
-  const handleMarkChange = (studentId: string, text: string) => {
-    if (/^\d*$/.test(text) && (text === '' || Number(text) <= Number(maxMarks))) {
-      setMarks((prev) => ({ ...prev, [studentId]: text }));
-    }
+  const handleComponentMaximumChange = (field: ComponentField, text: string) => {
+    if (!/^\d{0,3}$/.test(text)) return;
+    const maximum = Number(text);
+    if (text !== '' && (maximum < 1 || maximum > 999)) return;
+    updateCurrentDraft((draft) => {
+      return {
+        ...draft,
+        componentMaximums: {
+          ...stringifyComponentMaximums(),
+          ...draft.componentMaximums,
+          [field]: text,
+        },
+      };
+    });
   };
+
+  const handleConsolidatedMarkChange = useCallback((studentId: string, text: string) => {
+    const normalizedText = normalizeAssessmentInput(text);
+    updateCurrentDraft((draft) => {
+      const maximum = Number(draft.consolidatedMaxMarks || DEFAULT_CONSOLIDATED_MAX);
+      if (!isValidAssessmentInput(normalizedText, maximum)) return draft;
+      return {
+        ...draft,
+        consolidatedByStudent: { ...draft.consolidatedByStudent, [studentId]: normalizedText },
+      };
+    });
+  }, [updateCurrentDraft]);
+
+  const handleComponentMarkChange = useCallback((studentId: string, field: ComponentField, text: string) => {
+    const normalizedText = normalizeAssessmentInput(text);
+    updateCurrentDraft((draft) => {
+      const maximums = parseComponentMaximums(draft.componentMaximums);
+      if (!isValidAssessmentInput(normalizedText, maximums[field])) return draft;
+      return {
+        ...draft,
+        componentByStudent: {
+          ...draft.componentByStudent,
+          [studentId]: updateComponentAssessmentInput(
+            draft.componentByStudent[studentId] ?? EMPTY_COMPONENT_MARKS,
+            field,
+            normalizedText,
+          ),
+        },
+      };
+    });
+  }, [updateCurrentDraft]);
+
+  const handleToggleAbsent = useCallback((studentId: string) => {
+    if (assessmentSchema === 'component') {
+      updateCurrentDraft((draft) => {
+        const current = draft.componentByStudent[studentId] ?? EMPTY_COMPONENT_MARKS;
+        const nextAbsent = !isComponentAssessmentAbsent(current);
+        return {
+          ...draft,
+          componentByStudent: {
+            ...draft.componentByStudent,
+            [studentId]: nextAbsent
+              ? { participation: 'A', writtenWork: 'A', projectWork: 'A', slipTest: 'A' }
+              : EMPTY_COMPONENT_MARKS,
+          },
+        };
+      });
+    } else {
+      updateCurrentDraft((draft) => {
+        const current = draft.consolidatedByStudent[studentId] ?? '';
+        const next = isAbsentAssessmentInput(current) ? '' : 'A';
+        const maximum = Number(draft.consolidatedMaxMarks || DEFAULT_CONSOLIDATED_MAX);
+        if (!isValidAssessmentInput(next, maximum)) return draft;
+        return {
+          ...draft,
+          consolidatedByStudent: { ...draft.consolidatedByStudent, [studentId]: next },
+        };
+      });
+    }
+    if (Platform.OS !== 'web') void Haptics.selectionAsync();
+  }, [assessmentSchema, updateCurrentDraft]);
+
+  useEffect(() => () => {
+    if (focusRetryRef.current) clearTimeout(focusRetryRef.current);
+  }, []);
+
+  useEffect(() => {
+    pendingFocusRef.current = null;
+    pendingScrollRef.current = null;
+    setFocusedStudentId(null);
+    if (focusRetryRef.current) clearTimeout(focusRetryRef.current);
+  }, [assessmentSchema, draftKey, studentQuery, rosterFilter]);
+
+  const registerInput = useCallback((key: MarksInputKey, node: TextInput | null) => {
+    inputRefs.current[key] = node;
+    if (node && pendingFocusRef.current === key) {
+      pendingFocusRef.current = null;
+      node.focus();
+    }
+  }, []);
+
+  const fieldOrder = useMemo<(ComponentField | 'consolidated')[]>(
+    () => (assessmentSchema === 'component'
+      ? COMPONENT_FIELDS.map((item) => item.field)
+      : ['consolidated']),
+    [assessmentSchema],
+  );
+
+  const focusField = useCallback((studentId: string, field: ComponentField | 'consolidated') => {
+    setFocusedStudentId(studentId);
+    setFocusedField(field);
+  }, []);
+
+  const moveToField = useCallback((studentId: string, field: ComponentField | 'consolidated') => {
+    const index = visibleStudents.findIndex((student) => student.id === studentId);
+    if (index < 0) return;
+    const key: MarksInputKey = `${studentId}:${field}`;
+    pendingFocusRef.current = key;
+    pendingScrollRef.current = key;
+    scrollRetryCountRef.current = 0;
+    // Scroll the student's entire card into view, including inputs below the focused one.
+    marksListRef.current?.scrollToIndex({ index, viewPosition: 0, animated: false });
+    const node = inputRefs.current[key];
+    if (node) {
+      pendingFocusRef.current = null;
+      node.focus();
+    }
+  }, [visibleStudents]);
+
+  const submitField = useCallback((studentId: string, field: ComponentField | 'consolidated') => {
+    const next = nextMarksInput(visibleStudents, fieldOrder, studentId, field);
+    if (next) {
+      moveToField(next.studentId, next.field);
+    } else {
+      pendingFocusRef.current = null;
+      pendingScrollRef.current = null;
+      setFocusedStudentId(null);
+      Keyboard.dismiss();
+    }
+  }, [fieldOrder, moveToField, visibleStudents]);
+
+  const focusNextStudent = useCallback(() => {
+    if (!focusedStudentId) return;
+    const next = nextMarksInput(visibleStudents, fieldOrder, focusedStudentId, fieldOrder[0], true);
+    if (next) moveToField(next.studentId, next.field);
+    else {
+      pendingFocusRef.current = null;
+      pendingScrollRef.current = null;
+      setFocusedStudentId(null);
+      Keyboard.dismiss();
+    }
+  }, [fieldOrder, focusedStudentId, moveToField, visibleStudents]);
 
   const handleAddSubExam = async () => {
     if (!selectedCategory) return;
@@ -427,7 +1899,6 @@ export default function UploadMarks() {
     };
     setExtraSubExams(updatedExtras);
     setSelectedSubExam(nextExam);
-    setMarks({});
     try {
       await AsyncStorage.setItem(EXTRA_SUB_EXAMS_KEY, JSON.stringify(updatedExtras));
     } catch {
@@ -437,11 +1908,56 @@ export default function UploadMarks() {
 
   const handleSubmit = async () => {
     if (!selectedCategory || !selectedAssignment) return;
-    const filledMarks = Object.keys(marks).map((studentId) => ({
-      student_id: studentId,
-      marks: Number(marks[studentId])
-    }));
+    const invalidStudent = students.find((student) => assessmentSchema === 'component'
+      ? COMPONENT_FIELDS.some(({ field }) => !isValidAssessmentInput(
+        currentDraft.componentByStudent[student.id]?.[field] ?? '', componentMaximums[field],
+      ))
+      : !isValidAssessmentInput(
+        currentDraft.consolidatedByStudent[student.id] ?? '', Number(currentDraft.consolidatedMaxMarks),
+      ));
+    if (invalidStudent) {
+      alertCompat('Check maximum marks', `Review marks for ${invalidStudent.person.display_name ?? invalidStudent.person.first_name}. A score exceeds its maximum. Update the score or the maximum marks before uploading.`);
+      return;
+    }
+    const partialStudent = assessmentSchema === 'component' && students.find((student) => {
+      const entry = currentDraft.componentByStudent[student.id] ?? EMPTY_COMPONENT_MARKS;
+      return hasAnyComponentMark(entry) && !isComponentAssessmentAbsent(entry) && !isComponentAssessmentComplete(entry);
+    });
+    if (partialStudent) {
+      const entry = currentDraft.componentByStudent[partialStudent.id] ?? EMPTY_COMPONENT_MARKS;
+      const missing = COMPONENT_FIELDS.filter(({ field }) => entry[field] === '').map(({ shortLabel }) => shortLabel);
+      if (Platform.OS !== 'web') void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      alertCompat('Complete remaining marks', `${partialStudent.person.display_name ?? partialStudent.person.first_name}: enter ${missing.join(', ')}. Use the Left filter to find students with unfinished marks. Tap AB only for a missed component.`);
+      return;
+    }
+
+    const filledMarks = students.flatMap((student) => {
+      if (assessmentSchema === 'component') {
+        const components = currentDraft.componentByStudent[student.id] ?? EMPTY_COMPONENT_MARKS;
+        if (isComponentAssessmentAbsent(components)) {
+          return [{ student_id: student.id, marks: null, is_absent: true }];
+        }
+        if (!isComponentAssessmentComplete(components)) return [];
+        const result = calculateComponentAssessment(components, componentMaximums);
+        return [{
+          student_id: student.id,
+          marks: result.obtained,
+          is_absent: false,
+          participation_marks: numericOrNullComponentMark(components.participation),
+          written_work_marks: numericOrNullComponentMark(components.writtenWork),
+          project_work_marks: numericOrNullComponentMark(components.projectWork),
+          slip_test_marks: numericOrNullComponentMark(components.slipTest),
+        }];
+      }
+      const marks = currentDraft.consolidatedByStudent[student.id] ?? '';
+      return marks === '' ? [] : [{
+        student_id: student.id,
+        marks: isAbsentAssessmentInput(marks) ? null : Number(marks),
+        is_absent: isAbsentAssessmentInput(marks),
+      }];
+    });
     if (filledMarks.length === 0) {
+      if (Platform.OS !== 'web') void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
       alertCompat('Warning', 'No marks entered.');
       return;
     }
@@ -454,23 +1970,44 @@ export default function UploadMarks() {
           text: 'Upload',
           onPress: async () => {
             try {
-              setLoading(true);
-              await ResultService.upload({
+              setUploading(true);
+              const uploadResult = await ResultService.upload({
                 class_section_id: selectedAssignment.class_section_id,
                 exam_category: selectedCategory.key,
                 sub_exam: selectedSubExam,
                 subject_id: selectedAssignment.subject_id,
-                max_marks: Number(maxMarks),
+                assessment_schema: assessmentSchema,
+                max_marks: assessmentSchema === 'component'
+                  ? componentTotal
+                  : Number(currentDraft.consolidatedMaxMarks),
+                component_maximums: assessmentSchema === 'component'
+                  ? {
+                      participation: componentMaximums.participation,
+                      written_work: componentMaximums.writtenWork,
+                      project_work: componentMaximums.projectWork,
+                      slip_test: componentMaximums.slipTest,
+                    }
+                  : undefined,
                 results: filledMarks
               });
-              alertCompat('Success', 'Marks uploaded successfully!');
-              setSelectedCategory(null);
-              setMarks({});
-            } catch (e) {
-
-              alertCompat('Error', 'Failed to upload marks');
+              if (Platform.OS !== 'web') void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              void AccessibilityInfo.announceForAccessibility(
+                `${uploadResult.uploaded_count} results uploaded successfully.`
+              );
+              if (uploadResult.failed_count > 0) {
+                const firstFailure = uploadResult.results.find((result) => result.error)?.error;
+                alertCompat(
+                  'Partially uploaded',
+                  `${uploadResult.uploaded_count} mark(s) saved and ${uploadResult.failed_count} failed.${firstFailure ? ` ${firstFailure}` : ''}`
+                );
+              } else {
+                alertCompat('Success', 'Marks uploaded successfully!');
+              }
+            } catch (error: any) {
+              if (Platform.OS !== 'web') void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+              alertCompat('Could not upload marks', error?.message || 'Failed to upload marks');
             } finally {
-              setLoading(false);
+              setUploading(false);
             }
           }
         }]
@@ -481,41 +2018,97 @@ export default function UploadMarks() {
   // ── renders ───────────────────────────────────────────────────────────────────
 
   const renderDashboard = () =>
-    <ScrollView contentContainerStyle={styles.dashboardContent}>
+    <ScrollView
+      contentContainerStyle={styles.dashboardContent}
+      showsVerticalScrollIndicator={false}
+      contentInsetAdjustmentBehavior="automatic"
+    >
       <View style={styles.headerSection}>
         <LinearGradient
           colors={isDark ? ['rgba(255,255,255,0.06)', 'rgba(255,255,255,0)'] : ['rgba(255,255,255,0.75)', 'rgba(255,255,255,0)']}
           style={styles.cardSheen}
         />
-        <Text style={styles.pageTitle}>Marks Entry</Text>
-        <Text style={styles.pageSubtitle}>Select an exam category to begin</Text>
+        <View style={styles.heroIcon}>
+          <Ionicons name="create-outline" size={24} color={theme.colors.primary} />
+        </View>
+        <View style={styles.heroCopy}>
+          <Text style={styles.eyebrow}>RESULTS &amp; ASSESSMENTS</Text>
+          <Text style={styles.pageTitle}>Enter marks faster</Text>
+          <Text style={styles.pageSubtitle}>
+            Pick a category, then type through the class. Absent is one tap. Upload stays in reach.
+          </Text>
+        </View>
+        {!isPhone ? (
+          <View style={styles.heroMeta}>
+            <Text style={styles.heroMetaValue}>{EXAM_CATEGORIES.length}</Text>
+            <Text style={styles.heroMetaLabel}>categories</Text>
+          </View>
+        ) : null}
       </View>
+
+      <View style={styles.sectionHeading}>
+        <Text style={styles.sectionTitle}>Assessment categories</Text>
+        <Text style={styles.sectionHint}>Choose one to continue</Text>
+      </View>
+
       <View style={styles.gridContainer}>
         {EXAM_CATEGORIES.map((cat, index) =>
           <Animated.View
             key={cat.key}
-            entering={FadeInDown.delay(index * 80).duration(500)}
-            style={styles.cardContainer}>
+            entering={reduceMotion ? undefined : FadeInDown.delay(index * 45).duration(260)}
+            style={[
+              styles.cardContainer,
+              dashboardColumns === 3 && index >= 3 && styles.cardContainerWide,
+              dashboardColumns === 2 && index === EXAM_CATEGORIES.length - 1 && styles.cardContainerCentered,
+            ]}>
 
-            <TouchableOpacity
-              style={styles.card}
-              activeOpacity={0.75}
+            <PressScale
+              style={{ width: '100%' }}
+              accessibilityLabel={`Open ${cat.title}`}
               onPress={() => {
                 setSelectedCategory(cat);
                 const exams = getDisplaySubExams(cat);
                 if (exams.length) setSelectedSubExam(exams[0]);
-              }}>
+              }}
+            >
+              <View style={styles.card}>
+                <View style={[styles.cardAccent, { backgroundColor: cat.color }]} />
+                {isPhone ? (
+                  <View style={styles.mobileCardRow}>
+                    <View style={[styles.iconBox, { backgroundColor: cat.color + (isDark ? '22' : '14') }]}>
+                      <Ionicons name={cat.icon} size={23} color={cat.color} />
+                    </View>
+                    <View style={styles.mobileCardCopy}>
+                      <Text style={styles.cardTitle}>{cat.title}</Text>
+                      <Text style={styles.cardSubtitle} numberOfLines={2}>{cat.description}</Text>
+                      <Text style={[styles.mobileExamCount, { color: cat.color }]}>
+                        {getDisplaySubExams(cat).length} exams available
+                      </Text>
+                    </View>
+                    <View style={[styles.arrowBox, { backgroundColor: cat.color + (isDark ? '22' : '12') }]}>
+                      <Ionicons name="chevron-forward" size={18} color={cat.color} />
+                    </View>
+                  </View>
+                ) : (
+                  <>
+                    <View style={styles.cardTopRow}>
+                      <View style={[styles.iconBox, { backgroundColor: cat.color + (isDark ? '22' : '14') }]}>
+                    <Ionicons name={cat.icon} size={23} color={cat.color} />
+                  </View>
+                      <View style={[styles.examCountPill, { backgroundColor: cat.color + (isDark ? '22' : '10') }]}>
+                        <Text style={[styles.examCountText, { color: cat.color }]}>
+                      {getDisplaySubExams(cat).length} exams
+                    </Text>
+                  </View>
+                </View>
 
-              <View style={[styles.iconBox, { backgroundColor: cat.color + '18' }, clayGlow(cat.color, 'sm')]}>
-                <Ionicons name={cat.icon} size={22} color={cat.color} />
-              </View>
-              <View style={styles.textContainer}>
-                <Text style={styles.cardTitle}>{cat.title}</Text>
-                <Text style={styles.cardSubtitle}>{cat.description}</Text>
-                {cat.subExams &&
+                <View style={styles.textContainer}>
+                  <Text style={styles.cardTitle}>{cat.title}</Text>
+                  <Text style={styles.cardSubtitle}>{cat.description}</Text>
+                  {cat.subExams &&
                   <View style={styles.badgeRow}>
                     {getDisplaySubExams(cat).slice(0, 4).map((sub) =>
-                      <View key={sub} style={[styles.badge, { borderColor: cat.color + '60' }]}>
+                          <View key={sub} style={[styles.badge, { borderColor: cat.color + '3D' }]}>
                         <Text style={[styles.badgeText, { color: cat.color }]}>{sub}</Text>
                       </View>
                     )}
@@ -525,12 +2118,19 @@ export default function UploadMarks() {
                       </Text>
                     }
                   </View>
-                }
+                  }
+                </View>
+
+                <View style={styles.cardActionRow}>
+                  <Text style={[styles.cardActionText, { color: cat.color }]}>Enter marks</Text>
+                      <View style={[styles.arrowBox, { backgroundColor: cat.color + (isDark ? '22' : '12') }]}>
+                    <Ionicons name="arrow-forward" size={17} color={cat.color} />
+                  </View>
+                </View>
+                  </>
+                )}
               </View>
-              <View style={[styles.arrowBox, { backgroundColor: cat.color }, clayGlow(cat.color, 'sm')]}>
-                <Ionicons name="arrow-forward" size={16} color="#fff" />
-              </View>
-            </TouchableOpacity>
+            </PressScale>
           </Animated.View>
         )}
       </View>
@@ -542,253 +2142,523 @@ export default function UploadMarks() {
         <View style={styles.emptyFilterBanner}>
           <Ionicons name="warning-outline" size={16} color="#DC2626" />
           <Text style={styles.emptyFilterText}>No classes are assigned to you in the timetable.</Text>
-        </View>);
-
+        </View>
+      );
     }
 
+    const maxSummary = assessmentSchema === 'component'
+      ? COMPONENT_FIELDS.map(({ field }) => currentDraft.componentMaximums[field]).join(' · ')
+      : currentDraft.consolidatedMaxMarks;
+
     return (
-      <View style={styles.filterSection}>
-        <LinearGradient
-          colors={isDark ? ['rgba(255,255,255,0.06)', 'rgba(255,255,255,0)'] : ['rgba(255,255,255,0.75)', 'rgba(255,255,255,0)']}
-          style={styles.cardSheen}
-        />
-        <View style={styles.filterGroup}>
-          <FilterLabelPill icon="business-outline" label="Class" color="#8B5CF6" />
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-            {classSections.map((cs) => {
-              const active = selectedClassSectionId === cs.class_section_id;
-              return (
-                <TouchableOpacity
-                  key={cs.class_section_id}
-                  style={[styles.chip, active && styles.chipActive]}
-                  onPress={() => setSelectedClassSectionId(cs.class_section_id)}
-                  activeOpacity={0.7}>
-                  <Text style={[styles.chipText, active && styles.chipTextActive]}>{cs.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </ScrollView>
-        </View>
-
-        <View style={styles.filterGroup}>
-          <FilterLabelPill icon="book-outline" label="Subject" color="#10B981" />
-          {availableSubjects.length === 0 ? (
-            <Text style={styles.noSubjectText}>No subjects for this class.</Text>
-          ) : (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-              {availableSubjects.map((a) => {
-                const active = selectedSubjectId === a.subject_id;
-                return (
-                  <TouchableOpacity
-                    key={a.subject_id}
-                    style={[styles.chip, styles.chipSubject, active && styles.chipSubjectActive]}
-                    onPress={() => setSelectedSubjectId(a.subject_id)}
-                    activeOpacity={0.7}>
-                    <Text style={[styles.chipText, active && styles.chipSubjectTextActive]}>{a.subject_name}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          )}
-        </View>
-
-        <View style={styles.filterGroup}>
-          <FilterLabelPill icon="layers-outline" label="Exam" color="#F59E0B" />
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
-            {activeSubExams.map((exam) => {
-              const active = selectedSubExam === exam;
-              return (
-                <TouchableOpacity
-                  key={exam}
-                  style={[styles.examTab, active && styles.examTabActive]}
-                  onPress={() => setSelectedSubExam(exam)}
-                  activeOpacity={0.7}>
-                  <Text style={[styles.examTabText, active && styles.examTabTextActive]}>{exam}</Text>
-                </TouchableOpacity>
-              );
-            })}
-            <TouchableOpacity style={styles.examTabAdd} onPress={handleAddSubExam} activeOpacity={0.7} accessibilityLabel="Add exam">
-              <Ionicons name="add" size={18} color="#8B5CF6" />
-            </TouchableOpacity>
-          </ScrollView>
-        </View>
-
-        <View style={styles.workspaceDivider} />
-
-        <View style={styles.maxMarksRow}>
-          <View style={styles.maxMarksLeft}>
-            <View style={[styles.maxMarksIcon, clayGlow(accentColor, 'sm')]}>
-              <Ionicons name="trophy" size={16} color={accentColor} />
-            </View>
-            <View>
-              <Text style={styles.maxMarksLabel}>Total Marks</Text>
-              <Text style={styles.maxMarksHint}>Out of score for this exam</Text>
-            </View>
-          </View>
-          <AppTextInput
-            style={styles.maxMarksInput}
-            value={maxMarks}
-            onChangeText={handleMaxMarksChange}
-            keyboardType="numeric"
-            maxLength={3}
+      <View style={styles.filterStack}>
+        <View style={styles.filterDropdownRow}>
+          <ResultsFilterDropdown
+            label="Class"
+            value={selectedClassSectionId}
+            options={classSections.map((classSection) => ({
+              id: classSection.class_section_id,
+              label: classSection.label,
+            }))}
+            accent={accentColor}
+            mutedText={theme.colors.textSecondary}
+            isDark={isDark}
+            halfWidth={!setupCollapsed && isPhone}
+            dense={setupCollapsed}
+            onChange={setSelectedClassSectionId}
+          />
+          <ResultsFilterDropdown
+            label="Subject"
+            value={selectedSubjectId}
+            options={availableSubjects.map((assignment) => ({
+              id: assignment.subject_id,
+              label: assignment.subject_name,
+            }))}
+            accent={accentColor}
+            mutedText={theme.colors.textSecondary}
+            isDark={isDark}
+            halfWidth={!setupCollapsed && isPhone}
+            dense={setupCollapsed}
+            disabled={availableSubjects.length === 0}
+            emptyText="No subjects for this class"
+            onChange={setSelectedSubjectId}
+          />
+          <ResultsFilterDropdown
+            label="Exam"
+            value={selectedSubExam || null}
+            options={activeSubExams.map((exam) => ({ id: exam, label: exam }))}
+            accent={accentColor}
+            mutedText={theme.colors.textSecondary}
+            isDark={isDark}
+            compact={!setupCollapsed && isPhone}
+            dense={setupCollapsed}
+            disabled={activeSubExams.length === 0}
+            emptyText="No exams available"
+            onChange={setSelectedSubExam}
+            footerAction={selectedCategory ? {
+              label: `Add ${getNextExamName(selectedCategory, activeSubExams)}`,
+              onPress: handleAddSubExam,
+            } : undefined}
           />
         </View>
+
+        {setupCollapsed ? (
+          <PressScale onPress={() => setSetupCollapsed(false)} accessibilityLabel="Edit marking scheme">
+            <View style={styles.setupSummary}>
+              <View style={styles.setupSummaryCopy}>
+                <Text style={styles.setupSummaryLabel}>
+                  {assessmentSchema === 'component' ? 'Components' : 'Consolidated'} · Max {maxSummary}
+                </Text>
+                <Text style={[styles.setupSummaryTotal, { color: accentColor }]}>
+                  Total {assessmentSchema === 'component' ? componentTotal : currentDraft.consolidatedMaxMarks}
+                </Text>
+              </View>
+              <Text style={[styles.setupSummaryAction, { color: accentColor }]}>Edit</Text>
+            </View>
+          </PressScale>
+        ) : (
+          <>
+            <View style={styles.schemaRow}>
+              <SchemaToggle
+                value={assessmentSchema}
+                onChange={handleSchemaChange}
+                accent={accentColor}
+                mutedText={theme.colors.textSecondary}
+                isDark={isDark}
+              />
+              {assessmentSchema === 'consolidated' ? (
+                <View style={styles.maxMarksCompact}>
+                  <Text style={styles.maxMarksCompactLabel}>Max</Text>
+                  <AppTextInput
+                    style={styles.maxMarksInput}
+                    value={currentDraft.consolidatedMaxMarks}
+                    onChangeText={handleMaxMarksChange}
+                    keyboardType="numeric"
+                    maxLength={3}
+                    selectTextOnFocus
+                    accessibilityLabel="Maximum marks"
+                  />
+                </View>
+              ) : null}
+              {students.length > 0 ? (
+                <PressScale onPress={() => setSetupCollapsed(true)} accessibilityLabel="Hide setup">
+                  <View style={styles.doneSetupBtn}>
+                    <Text style={[styles.doneSetupText, { color: accentColor }]}>Done</Text>
+                  </View>
+                </PressScale>
+              ) : null}
+            </View>
+            {assessmentSchema === 'component' ? (
+              <View style={styles.componentMaxPanel}>
+                <View style={styles.componentMaxHeader}>
+                  <Text style={styles.componentMaxTitle}>Maximum marks</Text>
+                  <Text style={[styles.componentMaxTotal, { color: accentColor }]}>Total {componentTotal}</Text>
+                </View>
+                <View style={styles.componentMaxGrid}>
+                  {COMPONENT_FIELDS.map(({ field, shortLabel }) => (
+                    <View key={field} style={styles.componentMaxItem}>
+                      <Text style={styles.componentMaxLabel} numberOfLines={1}>{shortLabel}</Text>
+                      <AppTextInput
+                        style={styles.componentMaxInput}
+                        value={currentDraft.componentMaximums[field]}
+                        onChangeText={(text) => handleComponentMaximumChange(field, text)}
+                        keyboardType="numeric"
+                        maxLength={3}
+                        selectTextOnFocus
+                        accessibilityLabel={`Maximum marks for ${shortLabel}`}
+                      />
+                    </View>
+                  ))}
+                </View>
+                <Text style={styles.schemaHint}>
+                  Use the number pad for marks. Tap AB on Slip Test (or any part) if that part was missed — the other marks still count. Use Absent only if they missed the whole exam.
+                </Text>
+              </View>
+            ) : (
+              <Text style={styles.schemaHint}>
+                Type the final score, then Next. Use Absent only if they missed the whole exam.
+              </Text>
+            )}
+          </>
+        )}
       </View>
     );
-
   };
+
+  const renderStudentAssessmentCard = (student: StudentWithDetails) => {
+    const result = studentResults[student.id];
+    if (!result) return null;
+    const componentMarks = currentDraft.componentByStudent[student.id] ?? EMPTY_COMPONENT_MARKS;
+    const isAbsent = assessmentSchema === 'component'
+      ? isComponentAssessmentAbsent(componentMarks)
+      : isAbsentAssessmentInput(currentDraft.consolidatedByStudent[student.id]);
+    const entered = assessmentSchema === 'component'
+      ? isAbsent || isComponentAssessmentComplete(componentMarks)
+      : (currentDraft.consolidatedByStudent[student.id] ?? '') !== '';
+
+    return (
+      <StudentAssessmentCard
+        key={student.id}
+        student={student}
+        assessmentSchema={assessmentSchema}
+        componentMarks={componentMarks}
+        slipTestPrefilled={currentDraft.prefilledSlipTestByStudent?.[student.id] != null &&
+          currentDraft.prefilledSlipTestByStudent[student.id] === componentMarks.slipTest}
+        consolidatedValue={currentDraft.consolidatedByStudent[student.id] ?? ''}
+        consolidatedMax={currentDraft.consolidatedMaxMarks}
+        componentMaximums={componentMaximums}
+        result={result}
+        rank={studentRanks[student.id]}
+        attendance={attendanceByStudent[student.id]}
+        rankingMethod={rankingMethod}
+        entered={entered}
+        isAbsent={isAbsent}
+        isFocused={focusedStudentId === student.id}
+        accent={accentColor}
+        isDark={isDark}
+        styles={styles}
+        onComponentMarkChange={handleComponentMarkChange}
+        onConsolidatedMarkChange={handleConsolidatedMarkChange}
+        onToggleAbsent={handleToggleAbsent}
+        onFocusField={focusField}
+        onSubmitField={submitField}
+        registerInput={registerInput}
+      />
+    );
+  };
+
+  const uploadLabel = filledCount === 0
+    ? 'Upload results'
+    : `Upload ${filledCount}`;
+  const canUpload = !dataLoading && !uploading && !!selectedAssignment && filledCount > 0;
+  const rosterChips: { key: RosterFilter; label: string }[] = [
+    { key: 'all', label: `All ${students.length}` },
+    { key: 'remaining', label: `Left ${remainingCount}` },
+    { key: 'entered', label: `Done ${filledCount}` },
+    { key: 'absent', label: `Absent ${absentCount}` },
+  ];
+  const focusedStudent = students.find((student) => student.id === focusedStudentId);
+  const focusedName = focusedStudent
+    ? (focusedStudent.person.display_name ?? `${focusedStudent.person.first_name} ${focusedStudent.person.last_name}`)
+    : null;
 
   const renderUploadForm = () =>
     <>
-      <KeyboardAwareScreen
-        variant="scroll"
+      <FlatList
+        ref={marksListRef}
+        key={`marks-${studentColumns}`}
+        data={studentsLoading ? [] : visibleStudents}
+        numColumns={studentColumns}
+        keyExtractor={(student) => student.id}
+        renderItem={({ item }) => renderStudentAssessmentCard(item)}
         contentContainerStyle={styles.uploadScroll}
+        columnWrapperStyle={studentColumns > 1 ? { gap: 12 } : undefined}
+        ItemSeparatorComponent={MarksRowSeparator}
+        initialNumToRender={8}
+        maxToRenderPerBatch={6}
+        windowSize={7}
+        removeClippedSubviews={false}
+        keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
-        bottomOffset={120}>
-
-        {selectedAssignment && (
-          <Animated.View entering={FadeInRight.duration(300)} style={styles.breadcrumb}>
-            <View style={[styles.breadcrumbDot, { backgroundColor: accentColor }]} />
-            <Text style={styles.breadcrumbText} numberOfLines={1}>
-              {selectedAssignment.class_name}-{selectedAssignment.section_name}
-              <Text style={styles.breadcrumbSep}> · </Text>
-              {selectedAssignment.subject_name}
-              <Text style={styles.breadcrumbSep}> · </Text>
-              {selectedSubExam}
-            </Text>
-          </Animated.View>
+        renderScrollComponent={Platform.OS === 'web' ? undefined : (props) => (
+          <KeyboardAwareScrollView
+            {...props}
+            bottomOffset={assessmentSchema === 'component' && fieldOrder.indexOf(focusedField) < 2 ? 230 : 100}
+          />
         )}
-
-        {renderFilterSection()}
-
-        <View style={styles.studentsCard}>
+        onScrollToIndexFailed={({ index, averageItemLength }) => {
+          marksListRef.current?.scrollToOffset({ offset: marksHeaderHeightRef.current + averageItemLength * Math.floor(index / studentColumns), animated: false });
+          if (focusRetryRef.current) clearTimeout(focusRetryRef.current);
+          focusRetryRef.current = setTimeout(() => {
+            const key = pendingScrollRef.current;
+            if (!key || scrollRetryCountRef.current >= 3) return;
+            scrollRetryCountRef.current += 1;
+            const studentIndex = visibleStudents.findIndex((student) => key.startsWith(`${student.id}:`));
+            if (studentIndex >= 0) marksListRef.current?.scrollToIndex({ index: studentIndex, viewPosition: 0, animated: false });
+          }, 100);
+        }}
+        ListHeaderComponent={
+        <Animated.View
+          entering={reduceMotion ? undefined : FadeInDown.duration(260)}
+          style={styles.workspace}
+          onLayout={(event) => { marksHeaderHeightRef.current = event.nativeEvent.layout.height; }}
+        >
           <LinearGradient
-            colors={isDark ? ['rgba(255,255,255,0.05)', 'rgba(255,255,255,0)'] : ['rgba(255,255,255,0.65)', 'rgba(255,255,255,0)']}
+            colors={isDark ? ['rgba(255,255,255,0.06)', 'rgba(255,255,255,0)'] : ['rgba(255,255,255,0.75)', 'rgba(255,255,255,0)']}
             style={styles.cardSheen}
           />
-          <View style={styles.studentsCardHeader}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.studentsTitle}>Students</Text>
-              <Text style={styles.studentsSubtitle}>
-                {filledCount} of {students.length} marks entered
-              </Text>
-            </View>
-            <View style={[styles.marksCapPill, clayGlow(accentColor, 'sm')]}>
-              <Text style={[styles.marksCapText, { color: accentColor }]}>/{maxMarks}</Text>
-            </View>
+
+          <View style={styles.workspaceToolbar}>
+            <PressScale onPress={handleBackToDashboard} accessibilityLabel="All exams">
+              <View style={styles.allExamsBtn}>
+                <Ionicons name="grid-outline" size={14} color={accentColor} />
+                <Text style={[styles.allExamsText, { color: accentColor }]}>All exams</Text>
+              </View>
+            </PressScale>
+            <Text style={styles.toolbarContext} numberOfLines={1}>{contextLabel}</Text>
           </View>
 
-          {loading ? (
-            <View style={styles.loadingContainer}>
-              <LogoLoader size={60} color={accentColor} />
-              <Text style={styles.loadingText}>Loading students…</Text>
-            </View>
-          ) : students.length > 0 ? (
-            students.map((student, index) => (
-              <Animated.View
-                key={student.id}
-                entering={FadeInDown.delay(index * 40).duration(350)}
-                style={[styles.studentRow, index === students.length - 1 && styles.studentRowLast]}>
-                <View style={[styles.studentAvatar, clayGlow('#8B5CF6', 'sm')]}>
-                  <StudentPhoto
-                    photoUrl={student.person.photo_url}
-                    displayName={
-                      student.person.display_name ??
-                      `${student.person.first_name} ${student.person.last_name}`
-                    }
-                    size={44}
-                    borderRadius={14}
-                    fallbackTextStyle={styles.studentAvatarText}
-                  />
-                </View>
-                <View style={styles.studentInfo}>
-                  <Text style={styles.studentName} numberOfLines={1}>
-                    {student.person.display_name ??
-                      `${student.person.first_name} ${student.person.last_name}`}
-                  </Text>
-                  <Text style={styles.studentRoll}>#{student.admission_no}</Text>
-                </View>
-                <AppTextInput
-                  style={[styles.markInput, marks[student.id] ? styles.markInputFilled : null]}
-                  placeholder="—"
-                  placeholderTextColor="#9CA3AF"
-                  keyboardType="numeric"
-                  maxLength={3}
-                  value={marks[student.id] || ''}
-                  onChangeText={(text) => handleMarkChange(student.id, text)}
-                />
-              </Animated.View>
-            ))
-          ) : (
-            <View style={styles.emptyStudents}>
-              <View style={[styles.emptyIcon, clayGlow(accentColor, 'sm')]}>
-                <Ionicons name="people-outline" size={28} color={accentColor} />
-              </View>
-              <Text style={styles.emptyStudentsText}>No students found</Text>
-              <Text style={styles.emptyStudentsSubtext}>
-                {selectedAssignment
-                  ? `No students in ${selectedAssignment.class_name}-${selectedAssignment.section_name}`
-                  : 'Select a class and subject above'}
-              </Text>
-            </View>
-          )}
-        </View>
-      </KeyboardAwareScreen>
+          {renderFilterSection()}
 
-      <View style={styles.floatingAction}>
-        <View style={styles.submitCountBadge}>
-          <View style={[styles.submitCountDot, { backgroundColor: filledCount > 0 ? '#10B981' : '#94A3B8' }]} />
-          <Text style={styles.submitCountText}>
-            {filledCount} / {students.length} filled
-          </Text>
-        </View>
-        <Pressable
-          style={({ pressed }) => [styles.submitPressable, pressed && { opacity: 0.92 }]}
-          onPress={handleSubmit}
-          disabled={loading || !selectedAssignment}>
-          <LinearGradient
-            colors={loading || !selectedAssignment ? ['#C4B5FD', '#A78BFA'] : ['#6D28D9', '#8B5CF6', '#A78BFA']}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={[styles.submitButton, clayGlow('#7C3AED', 'md')]}>
-            {loading ? (
-              <LogoLoader size={30} color="#fff" />
-            ) : (
+          <View style={styles.studentsBlock}>
+            <View style={styles.studentsCardHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.studentsTitle}>Enter marks</Text>
+                <Text style={styles.studentsSubtitle}>
+                  {students.length === 0
+                    ? 'Students appear once a class is selected'
+                    : `${remainingCount} left · ${filledCount} ready to upload`}
+                </Text>
+                {students.length > 0 ? (
+                  <Text style={styles.studentsGuide}>
+                    {assessmentSchema === 'component'
+                      ? 'Enter each part. Use AB for a missed part, and Absent only if they missed the whole exam.'
+                      : 'Enter the score, or tap Absent if the test was missed.'}
+                  </Text>
+                ) : null}
+              </View>
+              {dataLoading && students.length > 0 ? (
+                <View style={styles.syncPill} accessibilityLiveRegion="polite">
+                  <LogoLoader size={16} color={accentColor} />
+                  <Text style={styles.syncText}>Syncing</Text>
+                </View>
+              ) : (
+                <View style={styles.marksCapPill}>
+                  <Text style={[styles.marksCapText, { color: accentColor }]}>
+                    /{assessmentSchema === 'component' ? componentTotal : currentDraft.consolidatedMaxMarks}
+                  </Text>
+                </View>
+              )}
+            </View>
+
+            {assessmentSchema === 'component' && prefilledSlipTestCount > 0 ? (
+              <View style={styles.prefillBanner} accessibilityLiveRegion="polite">
+                <Ionicons name="copy-outline" size={18} color={accentColor} />
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.prefillTitle, { color: accentColor }]}>
+                    Slip Test prefilled for {prefilledSlipTestCount} {prefilledSlipTestCount === 1 ? 'student' : 'students'}
+                  </Text>
+                  <Text style={styles.prefillHint}>
+                    Copied from consolidated marks for this class, subject and test. Complete Participation, Written and Project. Copied marks are editable. Slip Test maximum: {componentMaximums.slipTest}.
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+
+            {students.length > 0 ? (
               <>
-                <Ionicons name="cloud-upload-outline" size={20} color="#fff" />
-                <Text style={styles.submitText}>Upload Results</Text>
+                <View style={styles.searchRow}>
+                  <Ionicons name="search" size={16} color={theme.colors.textSecondary} />
+                  <AppTextInput
+                    style={themeInputStyles.inputInChrome}
+                    value={studentQuery}
+                    onChangeText={setStudentQuery}
+                    placeholder="Jump to name or roll"
+                    placeholderTextColor={theme.colors.textTertiary}
+                    returnKeyType="search"
+                    accessibilityLabel="Search students"
+                  />
+                  {studentQuery.length > 0 ? (
+                    <PressScale onPress={() => setStudentQuery('')} accessibilityLabel="Clear search">
+                      <Ionicons name="close-circle" size={18} color={theme.colors.textTertiary} />
+                    </PressScale>
+                  ) : null}
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.rosterChipRow}
+                >
+                  {rosterChips.map((chip) => {
+                    const active = rosterFilter === chip.key;
+                    return (
+                      <PressScale
+                        key={chip.key}
+                        onPress={() => setRosterFilter(chip.key)}
+                        accessibilityLabel={chip.label}
+                      >
+                        <View style={[styles.rosterChip, active && { backgroundColor: accentColor }]}>
+                          <Text style={[styles.rosterChipText, active && styles.rosterChipTextActive]}>
+                            {chip.label}
+                          </Text>
+                        </View>
+                      </PressScale>
+                    );
+                  })}
+                </ScrollView>
               </>
-            )}
-          </LinearGradient>
-        </Pressable>
-      </View>
+            ) : null}
+
+          </View>
+        </Animated.View>
+        }
+        ListEmptyComponent={studentsLoading ? <StudentsSkeleton /> : (
+          students.length > 0 ? (
+              <View style={styles.emptyStudents}>
+                <View style={styles.emptyIcon}>
+                  <Ionicons name="filter-outline" size={28} color={accentColor} />
+                </View>
+                <Text style={styles.emptyStudentsText}>
+                  {studentQuery ? `No match for “${studentQuery}”` : 'Nothing in this filter'}
+                </Text>
+                <Text style={styles.emptyStudentsSubtext}>
+                  {rosterFilter === 'remaining'
+                    ? 'Every student in this exam already has marks.'
+                    : 'Try All, or search by name or admission number.'}
+                </Text>
+                <PressScale onPress={() => { setRosterFilter('all'); setStudentQuery(''); }}>
+                  <View style={[styles.emptyAction, { backgroundColor: accentColor }]}>
+                    <Text style={styles.emptyActionText}>Show all students</Text>
+                  </View>
+                </PressScale>
+              </View>
+            ) : (
+              <View style={styles.emptyStudents}>
+                <View style={styles.emptyIcon}>
+                  <Ionicons name="people-outline" size={28} color={accentColor} />
+                </View>
+                <Text style={styles.emptyStudentsText}>No students found</Text>
+                <Text style={styles.emptyStudentsSubtext}>
+                  {selectedAssignment
+                    ? `No students in ${selectedAssignment.class_name}-${selectedAssignment.section_name}`
+                    : 'Select a class and subject above'}
+                </Text>
+              </View>
+            )
+        )}
+      />
+
+      {keyboardVisible && Platform.OS !== 'web' ? (
+        <KeyboardStickyView>
+          <View style={[styles.keyboardAccessory, isDark && styles.keyboardAccessoryDark]}>
+            <PressScale
+              disabled={!focusedStudentId}
+              onPress={() => focusedStudentId && handleToggleAbsent(focusedStudentId)}
+              accessibilityLabel="Mark focused student absent"
+            >
+              <View style={styles.accessoryGhost}>
+                <Text style={styles.accessoryGhostText}>Absent</Text>
+              </View>
+            </PressScale>
+            <Text style={styles.accessoryMeta} numberOfLines={1}>
+              {focusedName ?? `${filledCount}/${students.length}`}
+            </Text>
+            <PressScale
+              onPress={() => focusedStudentId && submitField(focusedStudentId, focusedField)}
+              accessibilityLabel="Next marks field"
+            >
+              <View style={[styles.accessoryNext, { backgroundColor: accentColor }]}>
+                <Text style={styles.accessoryNextText}>Next field</Text>
+              </View>
+            </PressScale>
+            <PressScale onPress={focusNextStudent} accessibilityLabel="Next student">
+              <View style={[styles.accessoryNext, { backgroundColor: accentColor }]}>
+                <Text style={styles.accessoryNextText}>Next student</Text>
+                <Ionicons name="arrow-forward" size={14} color="#FFFFFF" />
+              </View>
+            </PressScale>
+          </View>
+        </KeyboardStickyView>
+      ) : (
+        <Animated.View
+          entering={reduceMotion ? undefined : FadeInDown.duration(220)}
+          exiting={reduceMotion ? undefined : FadeOutDown.duration(160)}
+          style={styles.ctaDockWrap}
+          pointerEvents="box-none"
+        >
+          <LinearGradient
+            colors={isDark
+              ? ['rgba(11,16,32,0)', 'rgba(11,16,32,0.94)']
+              : ['rgba(233,237,246,0)', 'rgba(233,237,246,0.97)']}
+            style={styles.ctaScrim}
+            pointerEvents="none"
+          />
+          <View style={[styles.ctaDock, isDark && styles.ctaDockDark]}>
+            <BlurView
+              intensity={Platform.OS === 'ios' ? 32 : Platform.OS === 'web' ? 18 : 0}
+              tint={isDark ? 'dark' : 'light'}
+              style={StyleSheet.absoluteFill}
+              pointerEvents="none"
+            />
+            <LinearGradient
+              colors={isDark
+                ? ['rgba(255,255,255,0.06)', 'rgba(255,255,255,0)']
+                : ['rgba(255,255,255,0.72)', 'rgba(255,255,255,0.2)']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 0, y: 1 }}
+              style={StyleSheet.absoluteFill}
+              pointerEvents="none"
+            />
+            <View style={styles.ctaProgressBlock}>
+              <View style={styles.ctaProgressRow}>
+                <Text style={styles.ctaProgressLabel} numberOfLines={1}>
+                  {students.length === 0
+                    ? 'Select a class'
+                    : remainingCount === 0
+                      ? 'Ready to upload'
+                      : `${remainingCount} remaining`}
+                </Text>
+                <View style={[styles.pctPill, { backgroundColor: `${accentColor}16` }]}>
+                  <Text style={[styles.ctaProgressPct, { color: accentColor }]}>
+                    {Math.round(fillPercent * 100)}%
+                  </Text>
+                </View>
+              </View>
+              <ProgressTrack progress={fillPercent} accent={accentColor} />
+            </View>
+            <View style={styles.ctaActionWrap}>
+              <PressScale onPress={handleSubmit} disabled={!canUpload} accessibilityLabel={uploadLabel}>
+                <View style={[
+                  styles.ctaButton,
+                  canUpload
+                    ? { backgroundColor: accentColor, borderBottomWidth: 1.5, borderBottomColor: 'rgba(0,0,0,0.14)' }
+                    : styles.ctaButtonIdle,
+                ]}>
+                  {canUpload ? (
+                    <LinearGradient
+                      colors={['rgba(255,255,255,0.18)', 'rgba(255,255,255,0)']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 0, y: 1 }}
+                      style={StyleSheet.absoluteFill}
+                      pointerEvents="none"
+                    />
+                  ) : null}
+                  {uploading ? (
+                    <LogoLoader size={26} color="#fff" />
+                  ) : (
+                    <>
+                      <Ionicons
+                        name="cloud-upload-outline"
+                        size={18}
+                        color={canUpload ? '#fff' : (isDark ? '#94A3B8' : '#5C657A')}
+                      />
+                      <Text style={[styles.submitText, !canUpload && styles.submitTextIdle]}>{uploadLabel}</Text>
+                    </>
+                  )}
+                </View>
+              </PressScale>
+            </View>
+          </View>
+        </Animated.View>
+      )}
     </>;
 
   // ── Main Render ───────────────────────────────────────────────────────────────
 
   return (
-    <View style={styles.container}>
+    <TourTarget id="screen.staff-results.workspace" native><View style={styles.container}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
 
-      <View style={[styles.orb1, { backgroundColor: isDark ? 'rgba(124,111,255,0.14)' : 'rgba(124,111,255,0.10)' }]} />
-      <View style={[styles.orb2, { backgroundColor: isDark ? 'rgba(59,130,246,0.10)' : 'rgba(59,130,246,0.08)' }]} />
+      <View style={[styles.orb1, { backgroundColor: isDark ? 'rgba(124,111,255,0.14)' : 'rgba(124,111,255,0.10)' }]} pointerEvents="none" />
+      <View style={[styles.orb2, { backgroundColor: isDark ? 'rgba(59,130,246,0.10)' : 'rgba(59,130,246,0.08)' }]} pointerEvents="none" />
 
-      <StaffHeader
+      <TourTarget id="screen.staff-results.overview"><StaffHeader
         title={selectedCategory?.title ?? 'Upload Marks'}
-        showBackButton={true} />
+        showBackButton={true} /></TourTarget>
       {isViewingAsAdmin && <ViewAsBanner name={viewAsName} />}
 
-      {selectedCategory && (
-        <TouchableOpacity style={styles.backToDash} onPress={handleBackToDashboard} activeOpacity={0.8}>
-          <View style={[styles.backIcon, clayGlow(accentColor, 'sm')]}>
-            <Ionicons name="grid-outline" size={14} color={accentColor} />
-          </View>
-          <Text style={styles.backText}>All Exams</Text>
-        </TouchableOpacity>
-      )}
-
       {selectedCategory ? renderUploadForm() : renderDashboard()}
-    </View>);
+    </View></TourTarget>);
 
 }
 
@@ -796,18 +2666,16 @@ export default function UploadMarks() {
 // Styles
 // ─────────────────────────────────────────────────────────────────────────────
 
-const getStyles = (theme: Theme, isDark: boolean) => {
-  const pageBg = isDark ? '#0B1020' : '#EFF2F9';
-  const cardBg = isDark ? '#1A2332' : '#EFF2F9';
-  const chipBase: ViewStyle = {
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-    borderRadius: 24,
-    backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : '#EFF2F9',
-    borderWidth: 1,
-    borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.8)',
-    ...clay(isDark, 'sm'),
-  };
+const getStyles = (
+  theme: Theme,
+  isDark: boolean,
+  dashboardColumns: number,
+  isPhone: boolean,
+  studentColumns: number,
+) => {
+  const pageBg = isDark ? clayTokens.colors.page.dark : clayTokens.colors.page.light;
+  const cardBg = isDark ? clayTokens.colors.card.dark : clayTokens.colors.raised.light;
+  const dashboardCardWidth = dashboardColumns === 3 ? '32%' : dashboardColumns === 2 ? '48.6%' : '100%';
 
   return StyleSheet.create({
     container: {
@@ -844,58 +2712,183 @@ const getStyles = (theme: Theme, isDark: boolean) => {
 
     // ── Dashboard ────────────────────────────────────────────────────────────
     dashboardContent: {
-      padding: 20,
+      width: '100%',
+      maxWidth: 1240,
+      alignSelf: 'center',
+      paddingHorizontal: isPhone ? 14 : 24,
+      paddingTop: isPhone ? 14 : 24,
       // Clear the floating bottom tab bar so the last category card isn't covered.
-      paddingBottom: staffTabBarReserve(theme.spacing),
+      paddingBottom: staffTabBarReserve(Spacing),
     },
     headerSection: {
-      marginBottom: 22,
-      ...clayCard(isDark, 'md'),
-      padding: 20,
+      marginBottom: isPhone ? 22 : 28,
+      padding: isPhone ? 18 : 24,
+      minHeight: isPhone ? undefined : 136,
+      flexDirection: 'row',
+      alignItems: isPhone ? 'flex-start' : 'center',
+      gap: isPhone ? 14 : 18,
+      backgroundColor: isDark ? clayTokens.colors.card.dark : clayTokens.colors.raised.light,
+      borderRadius: clayTokens.radii.card,
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.8)',
+      borderBottomWidth: 1.5,
+      borderBottomColor: isDark ? 'rgba(0,0,0,0.35)' : 'rgba(76,90,120,0.10)',
+      shadowColor: '#6B7A99',
+      shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: isDark ? 0.28 : 0.14,
+      shadowRadius: 16,
+      elevation: 3,
       overflow: 'hidden',
     },
+    heroIcon: {
+      width: isPhone ? 44 : 52,
+      height: isPhone ? 44 : 52,
+      borderRadius: isPhone ? 14 : 16,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: isDark ? 'rgba(129,140,248,0.14)' : '#EEF2FF',
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(129,140,248,0.22)' : '#E0E7FF',
+    },
+    heroCopy: {
+      flex: 1,
+      minWidth: 0,
+    },
+    eyebrow: {
+      marginBottom: 6,
+      color: theme.colors.primary,
+      fontSize: 10,
+      fontWeight: '800',
+      letterSpacing: 1.2,
+    },
     pageTitle: {
-      fontSize: 24,
-      fontWeight: '900',
-      color: theme.colors.text,
-      letterSpacing: -0.5,
+      fontSize: isPhone ? 21 : 27,
+      lineHeight: isPhone ? 27 : 34,
+      fontWeight: '800',
+      color: theme.colors.textStrong,
+      letterSpacing: -0.6,
     },
     pageSubtitle: {
-      fontSize: 13,
+      maxWidth: 620,
+      fontSize: isPhone ? 13 : 14,
       color: theme.colors.textSecondary,
-      marginTop: 6,
-      lineHeight: 18,
+      marginTop: 7,
+      lineHeight: isPhone ? 19 : 21,
+    },
+    heroMeta: {
+      minWidth: 92,
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+      alignItems: 'center',
+      borderRadius: 16,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : '#F8FAFC',
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.07)' : '#E2E8F0',
+    },
+    heroMetaValue: {
+      color: theme.colors.textStrong,
+      fontSize: 22,
+      lineHeight: 26,
+      fontWeight: '900',
+    },
+    heroMetaLabel: {
+      marginTop: 2,
+      color: theme.colors.textSecondary,
+      fontSize: 11,
+      fontWeight: '700',
+    },
+    sectionHeading: {
+      marginBottom: 14,
+      flexDirection: 'row',
+      alignItems: 'baseline',
+      justifyContent: 'space-between',
+      gap: 12,
+    },
+    sectionTitle: {
+      color: theme.colors.textStrong,
+      fontSize: isPhone ? 16 : 18,
+      fontWeight: '800',
+      letterSpacing: -0.3,
+    },
+    sectionHint: {
+      color: theme.colors.textSecondary,
+      fontSize: 12,
+      fontWeight: '600',
     },
     gridContainer: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
       gap: 16,
     },
     cardContainer: {
-      width: '100%',
+      width: dashboardCardWidth,
+    },
+    cardContainerWide: {
+      width: '48.6%',
+    },
+    cardContainerCentered: {
+      marginLeft: '25.7%',
     },
     card: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      padding: 20,
-      ...clayCard(isDark, 'md'),
+      minHeight: isPhone ? 118 : 218,
+      padding: isPhone ? 14 : 18,
+      backgroundColor: isDark ? clayTokens.colors.card.dark : clayTokens.colors.card.light,
+      borderRadius: clayTokens.radii.card,
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.75)',
+      borderBottomWidth: 1.5,
+      borderBottomColor: isDark ? 'rgba(0,0,0,0.28)' : 'rgba(76,90,120,0.10)',
+      shadowColor: '#6B7A99',
+      shadowOffset: { width: 0, height: 6 },
+      shadowOpacity: isDark ? 0.24 : 0.12,
+      shadowRadius: 14,
+      elevation: 3,
       overflow: 'hidden',
     },
+    cardAccent: {
+      position: 'absolute',
+      top: isPhone ? 14 : 0,
+      bottom: isPhone ? 14 : undefined,
+      left: isPhone ? 0 : 18,
+      right: isPhone ? undefined : 18,
+      width: isPhone ? 3 : undefined,
+      height: isPhone ? undefined : 3,
+      borderTopRightRadius: 3,
+      borderBottomRightRadius: 3,
+      borderBottomLeftRadius: isPhone ? 0 : 3,
+    },
+    cardTopRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 16,
+    },
     iconBox: {
-      width: 54,
-      height: 54,
-      borderRadius: 18,
+      width: isPhone ? 46 : 48,
+      height: isPhone ? 46 : 48,
+      borderRadius: 15,
       justifyContent: 'center',
       alignItems: 'center',
-      marginRight: 16,
       borderWidth: 1,
-      borderColor: 'rgba(255,255,255,0.4)',
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(148,163,184,0.12)',
+    },
+    examCountPill: {
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+    },
+    examCountText: {
+      fontSize: 10,
+      fontWeight: '800',
+      letterSpacing: 0.2,
     },
     textContainer: {
       flex: 1,
     },
     cardTitle: {
-      fontSize: 17,
+      fontSize: 16,
       fontWeight: '800',
-      color: theme.colors.text,
+      color: theme.colors.textStrong,
       marginBottom: 4,
       letterSpacing: -0.2,
     },
@@ -908,15 +2901,14 @@ const getStyles = (theme: Theme, isDark: boolean) => {
       flexDirection: 'row',
       flexWrap: 'wrap',
       gap: 6,
-      marginTop: 10,
+      marginTop: 12,
     },
     badge: {
       borderWidth: 1,
-      borderRadius: 10,
+      borderRadius: 999,
       paddingHorizontal: 8,
-      paddingVertical: 3,
-      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.5)',
-      ...clayInset(isDark),
+      paddingVertical: 4,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.035)' : '#F8FAFC',
     },
     badgeText: {
       fontSize: 11,
@@ -928,160 +2920,126 @@ const getStyles = (theme: Theme, isDark: boolean) => {
       alignSelf: 'center',
     },
     arrowBox: {
-      width: 42,
-      height: 42,
-      borderRadius: 16,
+      width: 30,
+      height: 30,
+      borderRadius: 10,
       justifyContent: 'center',
       alignItems: 'center',
-      marginLeft: 10,
+    },
+    cardActionRow: {
+      marginTop: 16,
+      paddingTop: 12,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      borderTopWidth: 1,
+      borderTopColor: isDark ? 'rgba(255,255,255,0.07)' : '#F1F5F9',
+    },
+    cardActionText: {
+      fontSize: 12,
+      fontWeight: '800',
+    },
+    mobileCardRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+    },
+    mobileCardCopy: {
+      flex: 1,
+      minWidth: 0,
+    },
+    mobileExamCount: {
+      marginTop: 7,
+      fontSize: 11,
+      fontWeight: '800',
     },
 
     // ── Upload flow ──────────────────────────────────────────────────────────
     uploadScroll: {
-      paddingBottom: 200,
+      width: '100%',
+      maxWidth: 1180,
+      alignSelf: 'center',
+      paddingHorizontal: isPhone ? 12 : 20,
+      paddingTop: isPhone ? 10 : 16,
+      paddingBottom: STAFF_TAB_BAR_HEIGHT + 188,
     },
-    backToDash: {
+    workspace: {
+      backgroundColor: cardBg,
+      borderRadius: clayTokens.radii.card,
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.8)',
+      borderBottomWidth: 1.5,
+      borderBottomColor: isDark ? 'rgba(0,0,0,0.32)' : 'rgba(76,90,120,0.10)',
+      shadowColor: '#6B7A99',
+      shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: isDark ? 0.28 : 0.14,
+      shadowRadius: 16,
+      elevation: 4,
+      overflow: 'hidden',
+      paddingBottom: 12,
+    },
+    workspaceToolbar: {
       flexDirection: 'row',
       alignItems: 'center',
-      marginHorizontal: 16,
-      marginTop: 8,
-      marginBottom: 10,
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-      alignSelf: 'flex-start',
       gap: 10,
+      paddingHorizontal: 14,
+      paddingTop: 14,
+      paddingBottom: 10,
     },
-    backIcon: {
-      width: 32,
-      height: 32,
-      borderRadius: 12,
-      backgroundColor: isDark ? 'rgba(124,111,255,0.14)' : '#EFF2F9',
-      alignItems: 'center',
-      justifyContent: 'center',
-      borderWidth: 1,
-      borderColor: 'rgba(124,111,255,0.3)',
-      ...clay(isDark, 'sm'),
-    },
-    backText: {
-      fontSize: 14,
-      color: theme.colors.textSecondary,
-      fontWeight: '800',
-    },
-    breadcrumb: {
+    allExamsBtn: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 8,
-      marginHorizontal: 16,
-      marginBottom: 12,
-      paddingHorizontal: 16,
-      paddingVertical: 12,
-      borderRadius: 16,
-      backgroundColor: isDark ? 'rgba(124,111,255,0.10)' : 'rgba(124,111,255,0.05)',
+      gap: 6,
+      minHeight: 40,
+      paddingHorizontal: 12,
+      borderRadius: clayTokens.radii.button,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : clayTokens.colors.inset.light,
       borderWidth: 1,
-      borderColor: isDark ? 'rgba(124,111,255,0.18)' : 'rgba(124,111,255,0.15)',
-      ...clayInset(isDark),
+      borderColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(148,163,184,0.18)',
     },
-    breadcrumbDot: {
-      width: 8,
-      height: 8,
-      borderRadius: 4,
+    allExamsText: {
+      fontSize: 13,
+      fontWeight: '700',
     },
-    breadcrumbText: {
+    toolbarContext: {
       flex: 1,
       fontSize: 13,
+      fontWeight: '700',
+      color: theme.colors.text,
+      letterSpacing: -0.1,
+    },
+    toolbarMeta: {
+      minWidth: 44,
+      alignItems: 'flex-end',
+    },
+    toolbarCount: {
+      fontSize: 13,
       fontWeight: '800',
-      color: isDark ? '#C4B5FD' : '#5B21B6',
-      letterSpacing: 0.1,
+      color: theme.colors.textSecondary,
+      fontVariant: ['tabular-nums'],
     },
-    breadcrumbSep: {
-      color: isDark ? 'rgba(196,181,253,0.5)' : 'rgba(91,33,182,0.35)',
-      fontWeight: '600',
+    filterStack: {
+      gap: 10,
+      paddingHorizontal: 14,
+      paddingBottom: 4,
     },
-
-    // ── Workspace / filters ────────────────────────────────────────────────────
-    filterSection: {
-      marginHorizontal: 16,
-      marginBottom: 16,
-      paddingTop: 20,
-      paddingBottom: 20,
-      gap: 20,
-      ...clayCard(isDark, 'lg'),
-      overflow: 'hidden',
-    },
-    filterGroup: {
-      paddingHorizontal: 16,
-    },
-    chipRow: {
+    filterDropdownRow: {
       flexDirection: 'row',
-      gap: 12,
-      paddingRight: 16,
-      paddingBottom: 6,
-    },
-    chip: chipBase,
-    chipActive: {
-      backgroundColor: isDark ? 'rgba(139,92,246,0.10)' : '#EEF2FF',
-      borderColor: 'rgba(139,92,246,0.2)',
-      ...clayInset(isDark),
-    },
-    chipSubject: chipBase,
-    chipSubjectActive: {
-      backgroundColor: isDark ? 'rgba(16,185,129,0.18)' : '#F0FDF4',
-      borderColor: 'rgba(16,185,129,0.2)',
-      ...clayInset(isDark),
-    },
-    chipText: {
-      fontSize: 14,
-      fontWeight: '800',
-      color: theme.colors.textSecondary,
-    },
-    chipTextActive: {
-      color: '#7C3AED',
-    },
-    chipSubjectTextActive: {
-      color: '#059669',
-    },
-    examTab: chipBase,
-    examTabActive: {
-      backgroundColor: isDark ? 'rgba(245,158,11,0.18)' : '#FFF7ED',
-      borderColor: 'rgba(245,158,11,0.2)',
-      ...clayInset(isDark),
-    },
-    examTabText: {
-      fontSize: 14,
-      fontWeight: '800',
-      color: theme.colors.textSecondary,
-    },
-    examTabTextActive: {
-      color: '#D97706',
-    },
-    examTabAdd: {
-      width: 42,
-      height: 42,
-      borderRadius: 21,
-      backgroundColor: isDark ? 'rgba(139,92,246,0.10)' : '#EFF2F9',
-      borderWidth: 1.5,
-      borderColor: '#8B5CF6',
-      borderStyle: 'dashed',
-      alignItems: 'center',
-      justifyContent: 'center',
-      ...clayInset(isDark),
-    },
-    workspaceDivider: {
-      height: 1,
-      marginHorizontal: 16,
-      backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(148,163,184,0.14)',
+      flexWrap: 'wrap',
+      alignItems: 'flex-end',
+      gap: 10,
     },
     emptyFilterBanner: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
-      margin: 16,
+      marginHorizontal: 14,
+      marginBottom: 8,
       padding: 14,
       backgroundColor: isDark ? 'rgba(239,68,68,0.12)' : '#FEF2F2',
-      borderRadius: 18,
+      borderRadius: 16,
       borderWidth: 1,
       borderColor: isDark ? 'rgba(239,68,68,0.25)' : '#FECACA',
-      ...clayGlow('#EF4444', 'sm'),
     },
     emptyFilterText: {
       color: '#DC2626',
@@ -1089,81 +3047,196 @@ const getStyles = (theme: Theme, isDark: boolean) => {
       fontWeight: '600',
       flex: 1,
     },
-    noSubjectText: {
-      color: theme.colors.textTertiary,
-      fontSize: 13,
-      fontStyle: 'italic',
-      paddingLeft: 4,
+    schemaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: 10,
+      marginTop: 6,
     },
-    maxMarksRow: {
+    schemaHint: {
+      color: theme.colors.textTertiary,
+      fontSize: 12,
+      lineHeight: 17,
+      paddingHorizontal: 2,
+    },
+    setupSummary: {
+      minHeight: 44,
+      paddingHorizontal: 12,
+      borderRadius: 14,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      paddingHorizontal: 20,
-      paddingTop: 4,
+      gap: 10,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : clayTokens.colors.inset.light,
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(148,163,184,0.16)',
     },
-    maxMarksLeft: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 14,
+    setupSummaryCopy: {
       flex: 1,
+      minWidth: 0,
+      gap: 2,
     },
-    maxMarksIcon: {
-      width: 48,
-      height: 48,
-      borderRadius: 16,
-      backgroundColor: isDark ? 'rgba(124,111,255,0.12)' : '#EFF2F9',
+    setupSummaryLabel: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: theme.colors.text,
+    },
+    setupSummaryTotal: {
+      fontSize: 11,
+      fontWeight: '800',
+    },
+    setupSummaryAction: {
+      fontSize: 13,
+      fontWeight: '800',
+    },
+    doneSetupBtn: {
+      minHeight: 40,
+      paddingHorizontal: 12,
+      borderRadius: 12,
       alignItems: 'center',
       justifyContent: 'center',
-      borderWidth: 1,
-      borderColor: 'rgba(124,111,255,0.3)',
-      ...clay(isDark, 'sm'),
+      backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : clayTokens.colors.inset.light,
     },
-    maxMarksLabel: {
-      fontSize: 15,
+    doneSetupText: {
+      fontSize: 13,
       fontWeight: '800',
+    },
+    searchRow: {
+      marginHorizontal: 12,
+      marginBottom: 10,
+      minHeight: 46,
+      paddingHorizontal: 12,
+      borderRadius: clayTokens.radii.input,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : clayTokens.colors.inset.light,
+      borderWidth: 1.5,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(76,90,120,0.12)',
+    },
+    rosterChipRow: {
+      paddingHorizontal: 12,
+      paddingBottom: 10,
+      gap: 8,
+    },
+    rosterChip: {
+      height: 34,
+      paddingHorizontal: 12,
+      borderRadius: clayTokens.radii.chip,
+      justifyContent: 'center',
+      backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(79,110,247,0.08)',
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(79,110,247,0.18)',
+    },
+    rosterChipText: {
+      fontSize: 12,
+      fontWeight: '700',
       color: theme.colors.text,
+    },
+    rosterChipTextActive: {
+      color: '#FFFFFF',
+    },
+    componentMaxPanel: {
+      gap: 10,
+      padding: 12,
+      borderRadius: clayTokens.radii.button,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : clayTokens.colors.inset.light,
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(148,163,184,0.16)',
+    },
+    componentMaxHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 12,
+    },
+    componentMaxTitle: {
+      fontSize: 12,
+      fontWeight: '700',
+      letterSpacing: 0.4,
+      textTransform: 'uppercase',
+      color: theme.colors.textSecondary,
+    },
+    componentMaxTotal: {
+      fontSize: 13,
+      fontWeight: '800',
       letterSpacing: -0.2,
     },
-    maxMarksHint: {
-      fontSize: 12,
-      color: theme.colors.textTertiary,
-      marginTop: 2,
+    componentMaxGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8,
+    },
+    componentMaxItem: {
+      flexGrow: 1,
+      flexBasis: isPhone ? '46%' : '22%',
+      minWidth: isPhone ? 120 : 72,
+      gap: 6,
+    },
+    componentMaxLabel: {
+      fontSize: 11,
+      fontWeight: '700',
+      color: theme.colors.textSecondary,
+      paddingHorizontal: 2,
+    },
+    componentMaxInput: {
+      borderWidth: 1.5,
+      borderColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(148,163,184,0.22)',
+      borderRadius: 14,
+      height: 44,
+      textAlign: 'center',
+      fontSize: 16,
+      fontWeight: '800',
+      color: theme.colors.text,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : '#F8FAFC',
+    },
+    maxMarksCompact: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    maxMarksCompactLabel: {
+      fontSize: 11,
+      fontWeight: '700',
+      letterSpacing: 0.5,
+      textTransform: 'uppercase',
+      color: theme.colors.textSecondary,
     },
     maxMarksInput: {
       borderWidth: 1.5,
-      borderColor: 'rgba(139,92,246,0.2)',
-      borderRadius: 16,
-      width: 86,
-      height: 54,
+      borderColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(148,163,184,0.22)',
+      borderRadius: 14,
+      width: 64,
+      height: 44,
       textAlign: 'center',
-      fontSize: 20,
-      fontWeight: '900',
-      color: '#7C3AED',
-      backgroundColor: isDark ? 'rgba(139,92,246,0.10)' : '#F5F3FF',
-      ...clayInset(isDark),
+      fontSize: 16,
+      fontWeight: '800',
+      color: theme.colors.text,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : '#F8FAFC',
     },
-
-    // ── Students card ────────────────────────────────────────────────────────
-    studentsCard: {
-      marginHorizontal: 16,
-      marginTop: 8,
-      ...clayCard(isDark, 'lg'),
-      overflow: 'hidden',
-      paddingBottom: 8,
+    studentsBlock: {
+      marginTop: 10,
+      borderTopWidth: 1,
+      borderTopColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(148,163,184,0.14)',
     },
-    studentsCardHeader: {
+    studentGrid: {
+      paddingHorizontal: 12,
+      paddingBottom: 4,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 12,
+    },
+        studentsCardHeader: {
       flexDirection: 'row',
       alignItems: 'center',
-      paddingHorizontal: 20,
-      paddingTop: 20,
-      paddingBottom: 16,
-      borderBottomWidth: 1,
-      borderBottomColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(148,163,184,0.15)',
+      paddingHorizontal: 14,
+      paddingTop: 14,
+      paddingBottom: 10,
     },
     studentsTitle: {
-      fontSize: 18,
-      fontWeight: '900',
+      fontSize: 16,
+      fontWeight: '800',
       color: theme.colors.text,
       letterSpacing: -0.3,
     },
@@ -1173,18 +3246,40 @@ const getStyles = (theme: Theme, isDark: boolean) => {
       marginTop: 4,
       fontWeight: '600',
     },
+    studentsGuide: {
+      marginTop: 6,
+      fontSize: 12,
+      lineHeight: 17,
+      fontWeight: '600',
+      color: theme.colors.textTertiary,
+    },
     marksCapPill: {
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-      borderRadius: 14,
-      backgroundColor: isDark ? 'rgba(124,111,255,0.10)' : '#EFF2F9',
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 12,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.7)',
       borderWidth: 1,
-      borderColor: 'rgba(124,111,255,0.2)',
-      ...clay(isDark, 'sm'),
+      borderColor: isDark ? 'rgba(255,255,255,0.10)' : 'rgba(148,163,184,0.18)',
     },
     marksCapText: {
       fontSize: 16,
       fontWeight: '900',
+    },
+    syncPill: {
+      minHeight: 36,
+      paddingHorizontal: 10,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      borderRadius: 12,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : '#F8FAFC',
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : '#E2E8F0',
+    },
+    syncText: {
+      color: theme.colors.textSecondary,
+      fontSize: 11,
+      fontWeight: '700',
     },
     loadingContainer: {
       alignItems: 'center',
@@ -1209,36 +3304,43 @@ const getStyles = (theme: Theme, isDark: boolean) => {
       borderBottomWidth: 0,
     },
     studentAvatar: {
-      width: 46,
-      height: 46,
+      width: 44,
+      height: 44,
       borderRadius: 16,
-      backgroundColor: isDark ? 'rgba(139,92,246,0.16)' : '#EFF2F9',
+      backgroundColor: isDark ? 'rgba(139,92,246,0.16)' : '#EEF0FF',
       justifyContent: 'center',
       alignItems: 'center',
-      borderWidth: 1,
-      borderColor: 'rgba(139,92,246,0.3)',
-      ...clay(isDark, 'sm'),
+      overflow: 'hidden',
     },
     studentAvatarText: {
-      fontSize: 16,
-      fontWeight: '900',
-      color: '#7C3AED',
+      fontSize: 17,
+      fontWeight: '800',
+      color: '#4338CA',
     },
     studentInfo: {
       flex: 1,
       minWidth: 0,
     },
     studentName: {
-      fontSize: 15,
+      fontSize: 16,
       fontWeight: '800',
       color: theme.colors.text,
-      letterSpacing: -0.1,
+      letterSpacing: -0.3,
+    },
+    rollPill: {
+      alignSelf: 'flex-start',
+      maxWidth: '100%',
+      marginTop: 5,
+      paddingHorizontal: 7,
+      paddingVertical: 2,
+      borderRadius: 999,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : clayTokens.colors.inset.light,
     },
     studentRoll: {
-      fontSize: 12,
+      fontSize: 11,
       color: theme.colors.textSecondary,
-      marginTop: 3,
-      fontWeight: '600',
+      fontWeight: '700',
+      letterSpacing: 0.2,
     },
     markInput: {
       borderWidth: 1.5,
@@ -1258,23 +3360,321 @@ const getStyles = (theme: Theme, isDark: boolean) => {
       backgroundColor: isDark ? 'rgba(139,92,246,0.14)' : '#F5F3FF',
       color: '#7C3AED',
     },
-    emptyStudents: {
-      alignItems: 'center',
-      paddingVertical: 56,
-      paddingHorizontal: 24,
-      gap: 12,
+    assessmentStudentShadow: {
+      flex: 1,
+      borderRadius: 22,
+      backgroundColor: isDark ? clayTokens.colors.card.dark : '#FFFFFF',
+      shadowColor: '#6B7A99',
+      shadowOffset: { width: 0, height: 10 },
+      shadowOpacity: isDark ? 0.32 : 0.12,
+      shadowRadius: 18,
+      elevation: 3,
     },
-    emptyIcon: {
-      width: 64,
-      height: 64,
-      borderRadius: 20,
-      backgroundColor: isDark ? 'rgba(124,111,255,0.10)' : '#EFF2F9',
+    assessmentStudentCard: {
+      flex: 1,
+      padding: isPhone ? 14 : 16,
+      paddingLeft: isPhone ? 16 : 18,
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.95)',
+      backgroundColor: isDark ? clayTokens.colors.card.dark : '#FFFFFF',
+      overflow: 'hidden',
+    },
+    assessmentStudentCardAbsent: {
+      backgroundColor: isDark ? 'rgba(210,65,81,0.12)' : '#FFF7F8',
+      borderColor: isDark ? 'rgba(210,65,81,0.32)' : 'rgba(210,65,81,0.16)',
+    },
+    statusRail: {
+      position: 'absolute',
+      left: 0,
+      top: 16,
+      bottom: 16,
+      width: 3,
+      borderTopRightRadius: 3,
+      borderBottomRightRadius: 3,
+    },
+    cardDivider: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(76,90,120,0.10)',
+      marginBottom: 12,
+    },
+    cardStatusRow: {
+      marginTop: 12,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    pendingDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+    },
+    scoreStrip: {
+      marginTop: 12,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: 6,
+    },
+    scoreChip: {
+      minHeight: 28,
+      paddingHorizontal: 10,
+      borderRadius: 999,
       alignItems: 'center',
       justifyContent: 'center',
-      marginBottom: 4,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : clayTokens.colors.inset.light,
+    },
+    scoreChipStrong: {
+      backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : '#F4F6FB',
+    },
+    scoreChipValue: {
+      fontSize: 12,
+      fontWeight: '800',
+      color: theme.colors.text,
+      letterSpacing: -0.2,
+    },
+    scoreChipMuted: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: theme.colors.textSecondary,
+    },
+    assessmentStudentHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      marginBottom: 12,
+    },
+    gradeBadge: {
+      minWidth: 42,
+      height: 34,
+      paddingHorizontal: 8,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    gradeBadgeText: {
+      fontSize: 14,
+      fontWeight: '800',
+      letterSpacing: -0.3,
+    },
+    absentChip: {
+      minHeight: 32,
+      paddingHorizontal: 10,
+      borderRadius: 999,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      backgroundColor: 'transparent',
       borderWidth: 1,
-      borderColor: 'rgba(124,111,255,0.2)',
-      ...clay(isDark, 'sm'),
+      borderColor: isDark ? 'rgba(255,255,255,0.14)' : 'rgba(76,90,120,0.16)',
+    },
+    absentChipActive: {
+      backgroundColor: clayTokens.colors.absent.bg,
+      borderColor: clayTokens.colors.absent.bg,
+    },
+    absentChipText: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: isDark ? '#CBD5E1' : '#5C657A',
+    },
+    absentChipTextActive: {
+      color: '#FFFFFF',
+    },
+    absentHint: {
+      fontSize: 12,
+      fontWeight: '600',
+      color: clayTokens.colors.absent.bg,
+      paddingHorizontal: 2,
+      marginBottom: 2,
+    },
+    pendingHint: {
+      flex: 1,
+      fontSize: 12,
+      fontWeight: '600',
+      color: theme.colors.textTertiary,
+    },
+    liveTotalsRow: {
+      marginTop: 12,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: 2,
+    },
+    liveTotalStrong: {
+      fontSize: 13,
+      fontWeight: '800',
+      color: theme.colors.text,
+      letterSpacing: -0.2,
+    },
+    liveTotalMuted: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: theme.colors.textSecondary,
+    },
+    liveDot: {
+      width: 3,
+      height: 3,
+      borderRadius: 2,
+      backgroundColor: 'rgba(76,90,120,0.28)',
+    },
+    emptyAction: {
+      marginTop: 8,
+      minHeight: 44,
+      paddingHorizontal: 16,
+      borderRadius: clayTokens.radii.button,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    emptyActionText: {
+      color: '#FFFFFF',
+      fontSize: 14,
+      fontWeight: '700',
+    },
+    componentGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 10,
+    },
+    prefillBanner: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 10,
+      padding: 12,
+      marginBottom: 12,
+      borderRadius: 12,
+      backgroundColor: isDark ? 'rgba(124,111,255,0.12)' : 'rgba(124,111,255,0.07)',
+    },
+    prefillTitle: {
+      fontSize: 13,
+      fontWeight: '700',
+    },
+    prefillHint: {
+      marginTop: 4,
+      color: theme.colors.textSecondary,
+      fontSize: 12,
+      lineHeight: 18,
+    },
+    componentField: {
+      flexGrow: 1,
+      flexBasis: '46%',
+      minWidth: 125,
+    },
+    componentLabelRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 6,
+      paddingHorizontal: 3,
+    },
+    componentLabel: {
+      flex: 1,
+      color: theme.colors.textSecondary,
+      fontSize: 11,
+      fontWeight: '700',
+    },
+    componentMaximum: {
+      color: theme.colors.textTertiary,
+      fontSize: 11,
+      fontWeight: '800',
+      marginLeft: 4,
+    },
+    componentInput: {
+      height: 48,
+      borderWidth: 1.5,
+      borderColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(148,163,184,0.25)',
+      borderRadius: 14,
+      textAlign: 'center',
+      fontSize: 17,
+      fontWeight: '800',
+      color: theme.colors.text,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : '#EFF2F9',
+      ...clayInset(isDark),
+    },
+    consolidatedEntryRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 16,
+      paddingHorizontal: 4,
+    },
+    consolidatedCopy: {
+      flex: 1,
+    },
+    consolidatedLabel: {
+      color: theme.colors.textSecondary,
+      fontSize: 11,
+      fontWeight: '800',
+      letterSpacing: 0.7,
+      textTransform: 'uppercase',
+    },
+    consolidatedHint: {
+      color: theme.colors.text,
+      fontSize: 16,
+      fontWeight: '800',
+      letterSpacing: -0.3,
+      marginTop: 4,
+    },
+    consolidatedInput: {
+      width: 92,
+      height: 54,
+      borderWidth: 1.5,
+      borderColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(148,163,184,0.25)',
+      borderRadius: 16,
+      textAlign: 'center',
+      fontSize: 20,
+      fontWeight: '900',
+      color: theme.colors.text,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : '#EFF2F9',
+      ...clayInset(isDark),
+    },
+    metricsRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8,
+      marginTop: 16,
+      paddingTop: 14,
+      borderTopWidth: 1,
+      borderTopColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(148,163,184,0.14)',
+    },
+    metricItem: {
+      flexGrow: 1,
+      minWidth: isPhone ? 82 : 72,
+      paddingHorizontal: 8,
+      paddingVertical: 8,
+      borderRadius: 12,
+      backgroundColor: isDark ? 'rgba(255,255,255,0.035)' : 'rgba(241,245,249,0.9)',
+      alignItems: 'center',
+    },
+    metricLabel: {
+      color: theme.colors.textTertiary,
+      fontSize: 9,
+      fontWeight: '800',
+      textTransform: 'uppercase',
+      letterSpacing: 0.4,
+    },
+    metricValue: {
+      color: theme.colors.text,
+      fontSize: 13,
+      fontWeight: '900',
+      marginTop: 4,
+    },
+    emptyStudents: {
+      alignItems: 'center',
+      paddingVertical: 28,
+      paddingHorizontal: 24,
+      gap: 10,
+    },
+    emptyIcon: {
+      width: 56,
+      height: 56,
+      borderRadius: 18,
+      backgroundColor: isDark ? 'rgba(124,111,255,0.10)' : 'rgba(255,255,255,0.7)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: 2,
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(148,163,184,0.18)',
     },
     emptyStudentsText: {
       fontSize: 17,
@@ -1289,53 +3689,140 @@ const getStyles = (theme: Theme, isDark: boolean) => {
     },
 
     // ── Submit ───────────────────────────────────────────────────────────────
-    floatingAction: {
+    ctaDockWrap: {
       position: 'absolute',
-      bottom: 90,
-      left: 18,
-      right: 18,
-      gap: 12,
+      left: 0,
+      right: 0,
+      bottom: STAFF_TAB_BAR_HEIGHT + Spacing.xl + 8,
+      alignItems: 'center',
+      paddingHorizontal: 16,
     },
-    submitCountBadge: {
-      alignSelf: 'center',
+    ctaScrim: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: -8,
+      height: 132,
+    },
+    ctaDock: {
+      width: '100%',
+      maxWidth: 440,
+      padding: isPhone ? 10 : 12,
+      gap: isPhone ? 12 : 10,
+      flexDirection: isPhone ? 'row' : 'column',
+      alignItems: isPhone ? 'center' : 'stretch',
+      backgroundColor: isDark ? 'rgba(21,29,45,0.94)' : 'rgba(255,255,255,0.96)',
+      borderRadius: 24,
+      borderWidth: 1,
+      borderColor: isDark ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.98)',
+      overflow: 'hidden',
+      shadowColor: '#4C5A78',
+      shadowOffset: { width: 0, height: 12 },
+      shadowOpacity: isDark ? 0.4 : 0.18,
+      shadowRadius: 24,
+      elevation: 8,
+    },
+    ctaDockDark: {
+      backgroundColor: 'rgba(21,29,45,0.96)',
+    },
+    keyboardAccessory: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 8,
-      paddingHorizontal: 18,
-      paddingVertical: 10,
-      borderRadius: 24,
-      backgroundColor: cardBg,
-      borderWidth: 1,
-      borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.8)',
-      ...clay(isDark, 'sm'),
+      gap: 10,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      backgroundColor: 'rgba(244,247,253,0.96)',
+      borderTopWidth: StyleSheet.hairlineWidth * 2,
+      borderTopColor: 'rgba(255,255,255,0.8)',
     },
-    submitCountDot: {
-      width: 8,
-      height: 8,
-      borderRadius: 4,
+    keyboardAccessoryDark: {
+      backgroundColor: 'rgba(21,29,45,0.96)',
+      borderTopColor: 'rgba(255,255,255,0.08)',
     },
-    submitCountText: {
+    accessoryGhost: {
+      minHeight: 40,
+      paddingHorizontal: 12,
+      borderRadius: 12,
+      justifyContent: 'center',
+      backgroundColor: clayTokens.colors.brand.roseSoft,
+    },
+    accessoryGhostText: {
       fontSize: 13,
       fontWeight: '800',
+      color: clayTokens.colors.absent.bg,
+    },
+    accessoryMeta: {
+      flex: 1,
+      fontSize: 13,
+      fontWeight: '700',
       color: theme.colors.textSecondary,
     },
-    submitPressable: {
-      borderRadius: 24,
-      overflow: 'hidden',
+    accessoryNext: {
+      minHeight: 40,
+      paddingHorizontal: 14,
+      borderRadius: 12,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
     },
-    submitButton: {
-      paddingVertical: 18,
-      borderRadius: 24,
+    accessoryNextText: {
+      color: '#FFFFFF',
+      fontSize: 13,
+      fontWeight: '800',
+    },
+    ctaProgressBlock: {
+      flex: isPhone ? 1 : undefined,
+      alignSelf: 'stretch',
+      justifyContent: 'center',
+      gap: 8,
+      minWidth: 0,
+    },
+    ctaActionWrap: {
+      width: isPhone ? 166 : '100%',
+    },
+    ctaProgressRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 4,
+    },
+    ctaProgressLabel: {
+      flex: 1,
+      fontSize: 13,
+      fontWeight: '700',
+      color: theme.colors.text,
+      letterSpacing: -0.2,
+    },
+    pctPill: {
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 999,
+    },
+    ctaProgressPct: {
+      fontSize: 12,
+      fontWeight: '800',
+      fontVariant: ['tabular-nums'],
+    },
+    ctaButton: {
+      height: isPhone ? 48 : 52,
+      borderRadius: 16,
+      overflow: 'hidden',
       flexDirection: 'row',
       justifyContent: 'center',
       alignItems: 'center',
-      gap: 10,
+      gap: 8,
+    },
+    ctaButtonIdle: {
+      backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : '#E6EAF3',
     },
     submitText: {
       color: '#fff',
-      fontSize: 17,
-      fontWeight: '800',
-      letterSpacing: 0.2,
+      fontSize: 15,
+      fontWeight: '700',
+      letterSpacing: 0.1,
+    },
+    submitTextIdle: {
+      color: isDark ? '#94A3B8' : '#5C657A',
     },
   });
 };

@@ -11,10 +11,12 @@ import { useAuth } from '../../src/hooks/useAuth';
 import { useTheme } from '../../src/hooks/useTheme';
 import { Theme } from '../../src/theme/themes';
 import LogoLoader from '../../src/components/LogoLoader';
+import StudentSubpageHeader from '../../src/components/StudentSubpageHeader';
 import HtmlPreview from '../../src/components/HtmlPreview';
 import { FeeService } from '../../src/services/feeService';
 import { SchoolSettingsService, SchoolSettings } from '../../src/services/schoolSettingsService';
 import { alertCompat } from '../../src/utils/crossPlatformAlert';
+import ParentFinesSection from '../../src/features/fines/ParentFinesSection';
 
 const FeesScreen = () => {
   const {
@@ -225,12 +227,15 @@ const FeesScreen = () => {
     </Animated.View>;
   };
   if (loading) {
-    return <View style={styles.loadingContainer}>
-      <LogoLoader size={60} color="#4F46E5" />
-    </View>;
+    return <SafeAreaView style={styles.container}>
+      <StudentSubpageHeader title={t('fees', 'My Fees')} onBack={() => router.back()} />
+      <View style={styles.loadingContainer}>
+        <LogoLoader size={60} color="#4F46E5" />
+      </View>
+    </SafeAreaView>;
   }
   return <SafeAreaView style={styles.container}>
-    <StatusBar barStyle="light-content" backgroundColor="#4F46E5" />
+    <StatusBar barStyle="light-content" />
 
     {/* Header */}
     <View style={styles.header}>
@@ -266,7 +271,7 @@ const FeesScreen = () => {
       </Animated.View>}
     </View>
 
-    <FlatList contentContainerStyle={styles.list} data={feeData?.fees || []} renderItem={renderFeeItem} keyExtractor={(item) => item.id} showsVerticalScrollIndicator={false} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#4F46E5" />} ListEmptyComponent={<View style={styles.emptyContainer}>
+    <FlatList contentContainerStyle={styles.list} data={feeData?.fees || []} renderItem={renderFeeItem} keyExtractor={(item) => item.id} showsVerticalScrollIndicator={false} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#4F46E5" />} ListHeaderComponent={<ParentFinesSection studentId="me" />} ListEmptyComponent={<View style={styles.emptyContainer}>
       <Ionicons name="wallet-outline" size={64} color="#ccc" />
       <Text style={styles.emptyText}>No fee records found.</Text>
     </View>} />

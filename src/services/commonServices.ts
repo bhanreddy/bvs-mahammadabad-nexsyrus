@@ -140,6 +140,7 @@ export interface LeaveApplication {
     leave_type: 'casual' | 'sick' | 'earned' | 'maternity' | 'paternity' | 'unpaid' | 'other';
     start_date: string;
     end_date: string;
+    half_day?: boolean;
     reason: string;
     status: 'pending' | 'approved' | 'rejected';
     applied_by?: string;
@@ -151,12 +152,48 @@ export interface LeaveApplication {
     applicant_name?: string;
     applicant_role?: string;
     reviewed_by_name?: string | null;
+    staff_id?: string | null;
+    payroll_treatment?: 'PAID_CL' | 'PAID_LEAVE' | 'UNPAID' | null;
+    payroll_months?: LeavePayrollMonthPreview[];
+}
+
+export interface LeavePayrollMonthPreview {
+    year: number;
+    month: number;
+    month_key: string;
+    available: boolean;
+    requested_payroll_days?: number;
+    cl_used_days?: number;
+    cl_entitlement_days?: number;
+    cl_remaining_days?: number;
+    projected_paid_cl_days?: number;
+    projected_unpaid_days?: number;
+    unpaid_days_without_cl?: number;
+    entitlement_reason?: string | null;
+    unavailable_reason?: string;
+}
+
+export type LeavePayrollTreatment = 'PAID_CL' | 'PAID_LEAVE' | 'UNPAID';
+
+export interface LeaveReviewResult {
+    message: string;
+    leave: LeaveApplication;
+    payroll_follow_up?: {
+        required: true;
+        code: 'SUPPLEMENTARY_PAYROLL_REQUIRED';
+        payroll_id: string;
+        month: number;
+        year: number;
+        workflow_status: string;
+        message: string;
+    } | null;
 }
 
 export interface CreateLeaveRequest {
     leave_type: string;
     start_date: string;
     end_date: string;
+    half_day?: boolean;
     reason: string;
 }
 
@@ -173,12 +210,16 @@ export const LeaveService = {
         return api.post<LeaveApplication>('/leaves', data);
     },
 
-    approve: async (id: string): Promise<LeaveApplication> => {
-        return api.put<LeaveApplication>(`/leaves/${id}`, { status: 'approved' });
+    approve: async (id: string, payroll_treatment: LeavePayrollTreatment, review_remarks?: string): Promise<LeaveReviewResult> => {
+        return api.put<LeaveReviewResult>(`/leaves/${id}`, {
+            status: 'approved',
+            payroll_treatment,
+            review_remarks,
+        });
     },
 
-    reject: async (id: string, review_remarks?: string): Promise<LeaveApplication> => {
-        return api.put<LeaveApplication>(`/leaves/${id}`, { status: 'rejected', review_remarks });
+    reject: async (id: string, review_remarks?: string): Promise<LeaveReviewResult> => {
+        return api.put<LeaveReviewResult>(`/leaves/${id}`, { status: 'rejected', review_remarks });
     },
 
     cancel: async (id: string): Promise<void> => {
@@ -334,8 +375,13 @@ export interface Exam {
 
 export interface ResultEntry {
     student_id: string;
-    marks: number;
+    marks: number | null;
+    is_absent?: boolean;
     max_marks?: number;
+    participation_marks?: number | null;
+    written_work_marks?: number | null;
+    project_work_marks?: number | null;
+    slip_test_marks?: number | null;
 }
 
 export interface ExamResultUpload {
@@ -344,7 +390,54 @@ export interface ExamResultUpload {
     sub_exam: string;
     subject_id?: string;
     max_marks?: number;
+    assessment_schema?: 'component' | 'consolidated';
+    component_maximums?: {
+        participation: number;
+        written_work: number;
+        project_work: number;
+        slip_test: number;
+    };
     results: ResultEntry[];
+}
+
+export interface StoredAssessmentMark {
+    student_id: string;
+    marks_obtained: number | null;
+    consolidated_marks_obtained: number | null;
+    participation_marks: number | null;
+    written_work_marks: number | null;
+    project_work_marks: number | null;
+    slip_test_marks: number | null;
+    is_absent: boolean;
+    remarks?: string | null;
+}
+
+export interface AssessmentMarksResponse {
+    marks: StoredAssessmentMark[];
+    attendance: { student_id: string; attendance_percentage: number | null }[];
+    max_marks: number;
+    consolidated_max_marks: number;
+    assessment_schema: 'component' | 'consolidated';
+    component_maximums?: {
+        participation: number;
+        written_work: number;
+        project_work: number;
+        slip_test: number;
+    };
+}
+
+export interface ExamResultUploadResponse {
+    message: string;
+    exam_id: string;
+    exam_subject_id: string;
+    uploaded_count: number;
+    failed_count: number;
+    results: {
+        student_id: string;
+        mark_id?: string;
+        success?: boolean;
+        error?: string;
+    }[];
 }
 
 export const ResultService = {
@@ -363,7 +456,20 @@ export const ResultService = {
     getExams: async (params?: { academic_year_id?: string; status?: string }): Promise<Exam[]> => {
         return api.get<Exam[]>('/results/exams', params);
     },
-    createExam: async (data: { name: string; academic_year_id: string; exam_type: string; start_date?: string; end_date?: string; status?: string }): Promise<Exam> => {
+    createExam: async (data: {
+        name: string;
+        academic_year_id: string;
+        exam_type: string;
+        start_date?: string;
+        end_date?: string;
+        status?: string;
+        special_subjects?: {
+            name: string;
+            max_marks: number;
+            passing_marks: number;
+            targets: { class_id: string; class_section_id: string | null }[];
+        }[];
+    }): Promise<Exam> => {
         return api.post<Exam>('/results/exams', data);
     },
     updateExam: async (id: string, data: Partial<Exam>): Promise<Exam> => {
@@ -373,12 +479,12 @@ export const ResultService = {
         return api.delete(`/results/exams/${id}${force ? '?force=true' : ''}`);
     },
 
-    upload: async (data: ExamResultUpload): Promise<{ success: boolean }> => {
-        return api.post<{ success: boolean }>('/results/upload', data);
+    upload: async (data: ExamResultUpload): Promise<ExamResultUploadResponse> => {
+        return api.post<ExamResultUploadResponse>('/results/upload', data);
     },
 
-    getMarks: async (params: { class_section_id: string; exam_category: string; sub_exam: string; subject_id: string }): Promise<{ marks: { student_id: string; marks_obtained: number; is_absent: boolean }[], max_marks: number }> => {
-        return api.get<{ marks: { student_id: string; marks_obtained: number; is_absent: boolean }[], max_marks: number }>('/results/marks', params);
+    getMarks: async (params: { class_section_id: string; exam_category: string; sub_exam: string; subject_id: string }): Promise<AssessmentMarksResponse> => {
+        return api.get<AssessmentMarksResponse>('/results/marks', params);
     }
 };
 

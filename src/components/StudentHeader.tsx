@@ -1,5 +1,6 @@
+import { AppTourHeaderButton, TourTarget } from '@/src/features/app-tour';
 import React, { useState } from 'react';
-import { View, StyleSheet, Platform, ViewStyle, TextStyle, Image, useWindowDimensions } from 'react-native';
+import { View, StyleSheet, Platform, ViewStyle, TextStyle, useWindowDimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
@@ -15,30 +16,13 @@ import LanguageToggle from './LanguageToggle';
 import { Shadows, Spacing } from '../theme/themes';
 import { useTheme } from '../hooks/useTheme';
 import { useAuth } from '../hooks/useAuth';
+import { notificationInboxService } from '../services/notificationInboxService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SCHOOL_CONFIG, schoolColorWithAlpha } from '../constants/schoolConfig';
 
 /** Brand violet used to tint every clay puck's shadow across the app. */
 const CLAY_ACCENT = '#7C6BB8';
-const GOLD = SCHOOL_CONFIG.theme.accent;
 const ICON_SIZE = 36;
-
-/** Short school label for the center brand pill (first 1–2 name tokens). */
-const SCHOOL_BRAND = (() => {
-    const words = SCHOOL_CONFIG.name.split(/\s+/).filter(Boolean);
-    return words.slice(0, Math.min(2, words.length)).join(' ') || 'School';
-})();
-
-/** Compact subtitle that fits a header — never the full ribbon tagline. */
-const SCHOOL_BRAND_SUB = (() => {
-    const words = SCHOOL_CONFIG.name.split(/\s+/).filter(Boolean);
-    const remainder = words.slice(2).join(' ');
-    if (remainder) return remainder;
-    if (SCHOOL_CONFIG.schoolCode && SCHOOL_CONFIG.schoolCode !== 'NA') {
-        return SCHOOL_CONFIG.schoolCode;
-    }
-    return 'Student';
-})();
 
 interface StudentHeaderProps {
     onMenuPress?: () => void;
@@ -48,11 +32,20 @@ interface StudentHeaderProps {
     style?: ViewStyle;
     /** Override title text style */
     titleStyle?: TextStyle;
+    /**
+     * Home masthead. Drops the rounded bottom, hairline, and shadow so the
+     * page background cannot show through as a white seam above the hero.
+     */
+    continuous?: boolean;
 }
 
 const isWeb = Platform.OS === 'web';
 
-const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, title?: string, showSettingsButton?: boolean, rightAction?: { icon: keyof typeof Ionicons.glyphMap; onPress: () => void } }> = ({ onMenuPress, showBackButton = false, title, showSettingsButton = true, rightAction, scrollY, menuUserType = 'student', style: containerStyleOverride, titleStyle: titleStyleOverride }) => {
+const INK = SCHOOL_CONFIG.theme.ribbonGradient[0];
+const GOLD = SCHOOL_CONFIG.theme.accent;
+const GOLD_MIST = SCHOOL_CONFIG.theme.ribbonTagline;
+
+const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, title?: string, showSettingsButton?: boolean, rightAction?: { icon: keyof typeof Ionicons.glyphMap; onPress: () => void } }> = ({ onMenuPress, showBackButton = false, title, showSettingsButton = true, rightAction, scrollY, menuUserType = 'student', continuous = false, style: containerStyleOverride, titleStyle: titleStyleOverride }) => {
     const router = useRouter();
     const { isDark } = useTheme();
     const { i18n } = useTranslation();
@@ -99,8 +92,8 @@ const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, t
 
     const animatedStyle = useAnimatedStyle(() => {
         if (!scrollY) {
-            /* The cosmic gradient (below) always paints over this — only the lifted shadow matters here. */
-            return { backgroundColor: 'transparent', borderBottomColor: 'transparent', shadowOpacity: 0.35 };
+            /* The gradient below paints the fill. A shadow here draws a pale seam on the light page. */
+            return { backgroundColor: 'transparent', borderBottomColor: 'transparent', shadowOpacity: continuous ? 0 : 0.35 };
         }
 
         const bgEnd = isDark ? 'rgba(15,23,42,0.97)' : 'rgba(255,255,255,0.95)';
@@ -127,7 +120,7 @@ const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, t
             borderBottomColor: borderColor,
             shadowOpacity,
         };
-    }, [isDark]);
+    }, [isDark, continuous]);
 
     const isAbsolute = !!scrollY;
     /** Students use the bottom dock — never show a header back affordance. */
@@ -149,38 +142,6 @@ const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, t
         };
     }, [isDark]);
 
-    const brandSubStyle = useAnimatedStyle(() => {
-        if (!scrollY) return { color: schoolColorWithAlpha(GOLD, 0.92) };
-        return {
-            color: interpolateColor(
-                scrollY.value,
-                [0, 50],
-                [schoolColorWithAlpha(GOLD, 0.92), isDark ? '#38BDF8' : '#0369A1']
-            ),
-        };
-    }, [isDark]);
-
-    const brandPillStyle = useAnimatedStyle(() => {
-        if (!scrollY) {
-            return {
-                backgroundColor: 'rgba(255,255,255,0.10)',
-                borderColor: 'rgba(255,255,255,0.16)',
-            };
-        }
-        return {
-            backgroundColor: interpolateColor(
-                scrollY.value,
-                [0, 50],
-                ['rgba(255,255,255,0.10)', isDark ? 'rgba(255,255,255,0.06)' : 'rgba(124,107,184,0.08)']
-            ),
-            borderColor: interpolateColor(
-                scrollY.value,
-                [0, 50],
-                ['rgba(255,255,255,0.16)', schoolColorWithAlpha(CLAY_ACCENT, isDark ? 0.28 : 0.18)]
-            ),
-        };
-    }, [isDark]);
-
     // Without scrollY this header always uses the cosmic navy gradient, even
     // while the app is in light mode. Base the toggle contrast on its actual
     // surface instead of the global theme.
@@ -188,42 +149,60 @@ const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, t
 
     // Solid fills (no LinearGradient / elevation) — Android otherwise paints a
     // white rectangle over the inactive segment.
+    const iconColor = continuous ? GOLD_MIST : '#F4F0FB';
+    const clayAccent = continuous ? GOLD : CLAY_ACCENT;
+    const clayFill = continuous ? schoolColorWithAlpha(GOLD, 0.16) : undefined;
+    const clayGradient = continuous
+        ? `linear-gradient(165deg, ${schoolColorWithAlpha(GOLD, 0.42)} 0%, ${schoolColorWithAlpha(INK, 0.55)} 100%)`
+        : undefined;
+
     const langSwitch = (
         <LanguageToggle
             compact={isCompact || !!scrollY}
             language={isTeluguLang ? 'te' : 'en'}
             onLanguageChange={setLanguage}
             darkBackground={languageOnDarkSurface}
-            trackColor={languageOnDarkSurface ? 'rgba(116,101,184,0.24)' : 'rgba(124,107,184,0.12)'}
-            borderColor={languageOnDarkSurface ? 'rgba(222,216,255,0.30)' : 'rgba(124,107,184,0.22)'}
-            activeBackgroundColor={languageOnDarkSurface ? '#7568CF' : '#6B5CC4'}
-            activeLabelColor="#FFFFFF"
-            inactiveLabelColor={languageOnDarkSurface ? '#E9E5FF' : 'rgba(55,48,107,0.72)'}
+            trackColor={continuous ? schoolColorWithAlpha(GOLD, 0.16) : languageOnDarkSurface ? 'rgba(116,101,184,0.24)' : 'rgba(124,107,184,0.12)'}
+            borderColor={continuous ? schoolColorWithAlpha(GOLD, 0.42) : languageOnDarkSurface ? 'rgba(222,216,255,0.30)' : 'rgba(124,107,184,0.22)'}
+            activeBackgroundColor={continuous ? GOLD : languageOnDarkSurface ? '#7568CF' : '#6B5CC4'}
+            activeLabelColor={continuous ? INK : '#FFFFFF'}
+            inactiveLabelColor={continuous ? GOLD_MIST : languageOnDarkSurface ? '#E9E5FF' : 'rgba(55,48,107,0.72)'}
         />
     );
 
-    const rightCount = (rightAction ? 1 : 0) + (showSettingsButton ? 1 : 0);
+    const rightCount = 1 + (rightAction ? 1 : 0) + (showSettingsButton ? 1 : 0);
     const leftCount = 1 + (showNavBack ? 1 : 0) + (showNavMenu ? 1 : 0);
 
     return (
-        <Animated.View style={[
+        <TourTarget id={menuUserType === 'driver' ? 'driver.navigation' : menuUserType === 'staff' ? 'staff.navigation' : 'student.header'} native><Animated.View style={[
             styles.container,
             // On the student tabs the header sits inside a nested SafeAreaProvider
             // (ScreenLayout), so insets.top collapses to ~0 and the header rode up
             // under the school ribbon. The global stackShell already applies the real
             // safe-area offset, so a small fixed floor is all that's needed to clear
             // the ribbon's wave without re-introducing a large gap.
-            { paddingTop: isWeb ? 12 : Math.max(insets.top, 16), shadowColor: CLAY_ACCENT },
+            { paddingTop: isWeb ? 12 : Math.max(insets.top, 16), shadowColor: continuous ? 'transparent' : CLAY_ACCENT },
             isAbsolute && styles.absoluteHeader,
             animatedStyle,
             containerStyleOverride,
+            continuous && styles.continuous,
+            continuous && Platform.OS === 'web' ? { boxShadow: 'none' } as object : null,
         ]}>
             {!scrollY && (
                 <LinearGradient
-                    colors={['#05050A', '#13132B']}
+                    colors={continuous ? [INK, INK] : ['#05050A', '#13132B']}
                     start={{ x: 0, y: 0 }}
                     end={{ x: 0, y: 1 }}
                     style={StyleSheet.absoluteFill}
+                />
+            )}
+            {continuous && !scrollY && (
+                <LinearGradient
+                    colors={[schoolColorWithAlpha(GOLD, 0), schoolColorWithAlpha(GOLD, 0.2)]}
+                    start={{ x: 0, y: 1 }}
+                    end={{ x: 1, y: 0 }}
+                    style={StyleSheet.absoluteFill}
+                    pointerEvents="none"
                 />
             )}
 
@@ -231,44 +210,54 @@ const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, t
             <View style={[styles.sideRegion, styles.leftRegion]}>
                 {langSwitch}
                 {showNavBack ? (
-                    <ClayIconButton onPress={handleBack} isDark accent={CLAY_ACCENT} round size={ICON_SIZE}>
-                        <Ionicons name="arrow-back" size={18} color="#F4F0FB" />
+                    <ClayIconButton onPress={handleBack} isDark accent={clayAccent}
+                    fill={clayFill}
+                    webGradient={clayGradient}
+                    style={continuous ? styles.puck : undefined} round size={ICON_SIZE}>
+                        <Ionicons name="arrow-back" size={18} color={iconColor} />
                     </ClayIconButton>
                 ) : null}
                 {showNavMenu ? (
-                    <ClayIconButton onPress={handleMenuPress} isDark accent={CLAY_ACCENT} round size={ICON_SIZE}>
-                        <Ionicons name="menu" size={18} color="#F4F0FB" />
+                    <ClayIconButton onPress={handleMenuPress} isDark accent={clayAccent}
+                    fill={clayFill}
+                    webGradient={clayGradient}
+                    style={continuous ? styles.puck : undefined} round size={ICON_SIZE}>
+                        <Ionicons name="menu" size={18} color={iconColor} />
                     </ClayIconButton>
                 ) : null}
                 {/* Spacer keeps left/right visual weight closer when sides differ. */}
                 {leftCount < rightCount ? <View style={styles.sideBalance} /> : null}
             </View>
 
-            {/* Center: page title when present; otherwise a compact school brand. */}
+            {/* Center: page title only. */}
             <View style={styles.centerRegion} pointerEvents="none">
                 {title ? (
                     <Animated.Text style={[styles.headerTitle, fontColorStyle, titleStyleOverride]} numberOfLines={1}>
                         {title}
                     </Animated.Text>
-                ) : (
-                    <Animated.View style={[styles.brandPill, brandPillStyle]}>
-                        <View style={styles.brandLogoWrap}>
-                            <Image source={SCHOOL_CONFIG.logo} style={styles.brandLogo} />
-                        </View>
-                        <View style={styles.brandCopy}>
-                            <Animated.Text style={[styles.brandName, fontColorStyle]} numberOfLines={1}>
-                                {SCHOOL_BRAND}
-                            </Animated.Text>
-                            <Animated.Text style={[styles.brandTag, brandSubStyle]} numberOfLines={1}>
-                                {SCHOOL_BRAND_SUB}
-                            </Animated.Text>
-                        </View>
-                    </Animated.View>
-                )}
+                ) : null}
             </View>
 
             <View style={[styles.sideRegion, styles.rightRegion]}>
+                <AppTourHeaderButton color={iconColor} />
                 {rightCount < leftCount ? <View style={styles.sideBalance} /> : null}
+
+                <ClayIconButton
+                    onPress={() => {
+                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        void notificationInboxService.markAllRead();
+                        router.push('/notifications' as any);
+                    }}
+                    isDark
+                    accent={clayAccent}
+                    fill={clayFill}
+                    webGradient={clayGradient}
+                    style={continuous ? styles.puck : undefined}
+                    round
+                    size={ICON_SIZE}
+                >
+                    <Ionicons name="notifications-outline" size={17} color={iconColor} />
+                </ClayIconButton>
 
                 {rightAction && (
                     <ClayIconButton
@@ -277,11 +266,14 @@ const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, t
                             rightAction.onPress();
                         }}
                         isDark
-                        accent={CLAY_ACCENT}
+                        accent={clayAccent}
+                    fill={clayFill}
+                    webGradient={clayGradient}
+                    style={continuous ? styles.puck : undefined}
                         round
                         size={ICON_SIZE}
                     >
-                        <Ionicons name={rightAction.icon} size={17} color="#F4F0FB" />
+                        <Ionicons name={rightAction.icon} size={17} color={iconColor} />
                     </ClayIconButton>
                 )}
 
@@ -292,11 +284,14 @@ const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, t
                             router.push('/Screen/settings' as any);
                         }}
                         isDark
-                        accent={CLAY_ACCENT}
+                        accent={clayAccent}
+                    fill={clayFill}
+                    webGradient={clayGradient}
+                    style={continuous ? styles.puck : undefined}
                         round
                         size={ICON_SIZE}
                     >
-                        <Ionicons name="settings-outline" size={16} color="#F4F0FB" />
+                        <Ionicons name="settings-outline" size={16} color={iconColor} />
                     </ClayIconButton>
                 )}
             </View>
@@ -304,7 +299,7 @@ const StudentHeader: React.FC<StudentHeaderProps & { showBackButton?: boolean, t
             {menuUserType !== 'student' && (
                 <MenuOverlay visible={menuVisible} onClose={() => setMenuVisible(false)} userType={menuUserType} photoUrl={user?.photoUrl} />
             )}
-        </Animated.View>
+        </Animated.View></TourTarget>
     );
 };
 
@@ -337,6 +332,8 @@ const styles = StyleSheet.create({
     },
     rightRegion: {
         justifyContent: 'flex-end',
+        flexBasis: 'auto',
+        flexGrow: 0,
     },
     sideBalance: {
         width: ICON_SIZE,
@@ -352,50 +349,6 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         paddingHorizontal: 6,
     },
-    brandPill: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        maxWidth: '100%',
-        gap: 8,
-        paddingVertical: 5,
-        paddingLeft: 5,
-        paddingRight: 12,
-        borderRadius: 999,
-        borderWidth: 1,
-        overflow: 'hidden',
-    },
-    brandLogoWrap: {
-        width: 30,
-        height: 30,
-        borderRadius: 15,
-        backgroundColor: '#FFFFFF',
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderWidth: 1,
-        borderColor: schoolColorWithAlpha(GOLD, 0.4),
-    },
-    brandLogo: {
-        width: 20,
-        height: 20,
-        resizeMode: 'contain',
-    },
-    brandCopy: {
-        flexShrink: 1,
-        minWidth: 0,
-        gap: 1,
-    },
-    brandName: {
-        fontSize: 13,
-        fontWeight: '800',
-        letterSpacing: 0.2,
-    },
-    brandTag: {
-        fontSize: 10,
-        fontWeight: '700',
-        letterSpacing: 0.3,
-        textTransform: 'uppercase',
-        opacity: 0.95,
-    },
     headerTitle: {
         fontSize: 17,
         fontWeight: '800',
@@ -408,6 +361,20 @@ const styles = StyleSheet.create({
         left: 0,
         right: 0,
         zIndex: 100,
+    },
+    continuous: {
+        backgroundColor: INK,
+        borderBottomWidth: 0,
+        borderBottomLeftRadius: 0,
+        borderBottomRightRadius: 0,
+        paddingBottom: 2,
+        shadowOpacity: 0,
+        shadowRadius: 0,
+        elevation: 0,
+    },
+    puck: {
+        borderWidth: 1,
+        borderColor: schoolColorWithAlpha(GOLD, 0.45),
     },
 });
 

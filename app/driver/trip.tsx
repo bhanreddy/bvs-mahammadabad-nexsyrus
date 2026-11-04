@@ -1,3 +1,7 @@
+import { TourTarget } from '@/src/features/app-tour';
+import * as Crypto from 'expo-crypto';
+import DriverTrackingHealth from '../../src/components/DriverTrackingHealth';
+import { useTransportPolling } from '../../src/hooks/useTransportPolling';
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
@@ -23,6 +27,12 @@ import { useTheme } from '../../src/hooks/useTheme';
 import { useDriverLocationPermission } from '../../src/hooks/useDriverLocationPermission';
 import { useTranslation } from 'react-i18next';
 import { driverDateLocale } from '../../src/utils/driverI18n';
+import {
+  setDriverNextStopTarget,
+  postBusLocation,
+  startDriverLocationUpdates,
+  stopDriverLocationUpdates,
+} from '../../src/services/driverLocationTask';
 
 /** Legacy trips may still use `active`; canonical live status is `in_progress`. */
 const tripStatusIsActive = (s?: string | null) =>
@@ -36,13 +46,14 @@ const tripStatusIsActive = (s?: string | null) =>
 const calibrationFixBody = async (): Promise<Record<string, unknown>> => {
   if (Platform.OS === 'web') return {};
   try {
-    const pos = await Location.getLastKnownPositionAsync({ maxAge: 120_000 });
+    const pos = await Location.getLastKnownPositionAsync({ maxAge: 30_000, requiredAccuracy: 50 });
     if (!pos) return {};
     return {
       latitude: pos.coords.latitude,
       longitude: pos.coords.longitude,
       accuracy: pos.coords.accuracy ?? null,
       is_mocked: pos.mocked || false,
+      recorded_at: new Date(pos.timestamp).toISOString(),
     };
   } catch {
     return {};
@@ -52,13 +63,17 @@ const calibrationFixBody = async (): Promise<Record<string, unknown>> => {
 type TripPayload = {
   trip: {
     id: string;
+    route_id: string;
+    trip_direction?: string;
     status: string;
     started_at?: string | null;
     completed_at?: string | null;
     route_name?: string;
     direction?: string;
     date?: string;
+    bus_id?: string | null;
   };
+  available_routes?: { route_id: string; route_name: string; direction: string }[];
   stops: {
     stop_id: string;
     stop_name: string;
@@ -66,6 +81,8 @@ type TripPayload = {
     status?: string;
     reached_at?: string | null;
     assigned_students?: number;
+    latitude?: number | null;
+    longitude?: number | null;
   }[];
 };
 
@@ -76,19 +93,25 @@ export default function DriverTripScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [noRoute, setNoRoute] = useState(false);
   const [confirmComplete, setConfirmComplete] = useState(false);
+  const [confirmSos, setConfirmSos] = useState(false);
+  const [sosSending, setSosSending] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const foregroundWatchRef = useRef<Location.LocationSubscription | null>(null);
   const { theme } = useTheme();
   const { requestPermissions: requestDriverLocationPermissions, disclosureModal } = useDriverLocationPermission();
   const { t, i18n } = useTranslation();
   const dateLocale = driverDateLocale(i18n.language);
   const styles = React.useMemo(() => getStyles(theme), [theme]);
 
+  const startRequestRef = useRef<{selection:string;id:string}|null>(null);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  const [selectedLeg, setSelectedLeg] = useState<'morning' | 'evening'>('morning');
   const loadTrip = useCallback(async (silent?: boolean) => {
     try {
       if (!silent) setLoading(true);
-      const data = await api.get<TripPayload>('/transport/driver/my-trip');
+      const data = await api.get<TripPayload>(`/transport/driver/my-trip?trip_direction=${selectedLeg}${selectedRouteId ? `&route_id=${selectedRouteId}` : ''}`);
       setPayload(data);
-      setNoRoute(false);
+      setNoRoute(!data.trip);
     } catch (e: any) {
       const code = e?.statusCode ?? e?.status;
       const msg = e?.message || '';
@@ -102,33 +125,34 @@ export default function DriverTripScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [t]);
+  }, [t, selectedRouteId, selectedLeg]);
 
-  useFocusEffect(
-    useCallback(() => {
-      loadTrip();
-      return () => {
-        if (pollRef.current) clearInterval(pollRef.current);
-      };
-    }, [loadTrip]),
-  );
-
-  useEffect(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    const st = payload?.trip?.status;
-    if (tripStatusIsActive(st)) {
-      pollRef.current = setInterval(() => loadTrip(true), 30000);
-    }
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [payload?.trip?.status, loadTrip]);
+  useTransportPolling(() => loadTrip(true), 10000, `${selectedRouteId}:${selectedLeg}`);
 
   const trip = payload?.trip;
   const stops = payload?.stops ?? [];
+
+  const stopAllLocationTracking = stopDriverLocationUpdates;
+  useEffect(() => {
+    if (!trip?.bus_id || !tripStatusIsActive(trip.status)) return;
+    void startDriverLocationUpdates(trip.bus_id, trip.id).catch(() => {});
+  }, [trip?.id, trip?.status, trip?.bus_id]);
+
+  useEffect(() => {
+    if (!tripStatusIsActive(trip?.status)) {
+      void setDriverNextStopTarget(null);
+      return;
+    }
+    const next = stops.find((stop) => stop.status !== 'completed' && stop.status !== 'skipped');
+    if (next?.latitude == null || next.longitude == null) {
+      void setDriverNextStopTarget(null);
+      return;
+    }
+    void setDriverNextStopTarget({
+      latitude: Number(next.latitude),
+      longitude: Number(next.longitude),
+    });
+  }, [trip?.status, stops]);
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -144,18 +168,19 @@ export default function DriverTripScreen() {
         ...prev,
         stops: prev.stops.map((s) =>
           s.stop_id === stopId
-            ? { ...s, status: 'reached', reached_at: new Date().toISOString() }
+            ? { ...s, status: s.status === 'arrived' ? 'completed' : 'arrived', reached_at: new Date().toISOString() }
             : s,
         ),
       });
     }
     try {
       const fix = await calibrationFixBody();
-      await api.post(`/transport/driver/trip/${trip.id}/stop/${stopId}/reach`, {
+      const action = prev?.stops.find(s => s.stop_id === stopId)?.status === 'arrived' ? 'complete' : 'arrive';
+      await api.post(`/transport/trips/${trip.id}/stops/${stopId}/${action}`, {
         ...fix,
         source: 'manual',
       });
-      alertCompat(t('driver_ui.updated'), t('driver_ui.stop_marked_notifications_sent'));
+      await loadTrip(true);
     } catch {
       if (prev) setPayload(prev);
       alertCompat(t('driver_ui.error'), t('driver_ui.could_not_mark_stop'));
@@ -168,12 +193,24 @@ export default function DriverTripScreen() {
     if (!trip?.id || submitting) return;
     setSubmitting(true);
     try {
-      // Natural moment to ask for GPS: fixes captured on "Mark reached" feed
-      // route calibration (Phase A). Non-blocking; trip starts either way.
+      // A trip start is the consent point for precise, background GPS. This
+      // keeps calibrated routes marking stops even when the app is minimized.
+      let locationGranted = Platform.OS === 'web';
       if (Platform.OS !== 'web') {
-        await requestDriverLocationPermissions({ requestBackground: false }).catch(() => false);
+        locationGranted = await requestDriverLocationPermissions({ requestBackground: true }).catch(() => false);
       }
-      await api.post(`/transport/driver/trip/${trip.id}/start`, {});
+      const selection = `${trip.route_id}:${trip.trip_direction}`;
+      if (startRequestRef.current?.selection !== selection) startRequestRef.current = { selection, id: Crypto.randomUUID() };
+      const started = await api.post<{ trip: { id: string } }>('/transport/trips/start', { request_id: startRequestRef.current.id, route_id: trip.route_id, bus_id: trip.bus_id, trip_direction: trip.trip_direction });
+      startRequestRef.current = null;
+      if (locationGranted && trip.bus_id && Platform.OS !== 'web') {
+        await startDriverLocationUpdates(trip.bus_id, started.trip.id);
+      } else if (Platform.OS !== 'web') {
+        alertCompat(
+          t('driver_ui.location_sharing_paused'),
+          t('driver_ui.location_permission_instructions'),
+        );
+      }
       await loadTrip(true);
     } catch {
       alertCompat(t('driver_ui.error'), t('driver_ui.failed_to_start_trip'));
@@ -188,11 +225,36 @@ export default function DriverTripScreen() {
     setConfirmComplete(false);
     try {
       await api.post(`/transport/driver/trip/${trip.id}/complete`, {});
+      await stopAllLocationTracking();
       await loadTrip(true);
     } catch {
       alertCompat(t('driver_ui.error'), t('driver_ui.could_not_complete_trip'));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const triggerSos = async () => {
+    if (!trip?.bus_id || submitting) return;
+    setSosSending(true);
+    try {
+      const fix = await calibrationFixBody();
+      await api.post('/transport/sos', {
+        bus_id: trip.bus_id,
+        trip_id: trip.id,
+        lat: (fix as any).latitude ?? null,
+        lng: (fix as any).longitude ?? null,
+        reason: 'DRIVER_EMERGENCY_SOS',
+      });
+      setConfirmSos(false);
+      alertCompat(
+        'SOS received by the server',
+        'The emergency has been recorded. Contact the school office or emergency services directly if immediate help is needed.'
+      );
+    } catch {
+      alertCompat('SOS Notification', 'SOS delivery could not be confirmed. Please call the school office or emergency services directly.');
+    } finally {
+      setSosSending(false);
     }
   };
 
@@ -259,7 +321,7 @@ export default function DriverTripScreen() {
   return (
     <ScreenLayout>
       <StatusBar barStyle="dark-content" />
-      <StudentHeader
+      <TourTarget id="screen.driver-trip.overview"><StudentHeader
         menuUserType="driver"
         showBackButton={false}
         title={
@@ -267,10 +329,26 @@ export default function DriverTripScreen() {
             ? `${trip.route_name} · ${new Date(`${trip.date}T12:00:00`).toLocaleDateString(dateLocale)}`
             : trip?.route_name || t('driver_ui.trip')
         }
-      />
+      /></TourTarget>
       {statusBanner()}
+      {!tripStatusIsActive(trip?.status) && <View style={{ paddingHorizontal: 16, gap: 8 }}>
+        <Text style={{ color: theme.colors.textStrong }}>Choose route and journey</Text>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+          {(payload?.available_routes || []).map(route => <TouchableOpacity key={route.route_id}
+            onPress={() => setSelectedRouteId(route.route_id)} style={{ padding: 10, borderWidth: 1, borderRadius: 8,
+              borderColor: (selectedRouteId || trip?.route_id) === route.route_id ? theme.colors.primary : theme.colors.borderLight }}>
+            <Text style={{ color: theme.colors.textStrong }}>{route.route_name}</Text>
+          </TouchableOpacity>)}
+        </View>
+        {trip?.direction === 'both' && <View style={{ flexDirection: 'row', gap: 8 }}>
+          {(['morning','evening'] as const).map(leg => <TouchableOpacity key={leg} onPress={() => setSelectedLeg(leg)}
+            style={{ padding: 10, borderWidth: 1, borderRadius: 8, borderColor: selectedLeg === leg ? theme.colors.primary : theme.colors.borderLight }}>
+            <Text style={{ color: theme.colors.textStrong }}>{leg === 'morning' ? 'Morning pickup' : 'Evening drop-off'}</Text>
+          </TouchableOpacity>)}
+        </View>}
+      </View>}
       <View style={styles.actions}>
-        {trip?.status === 'scheduled' && (
+        {(!tripStatusIsActive(trip?.status)) && (
           <TouchableOpacity
             style={[styles.primaryBtn, submitting && styles.btnDisabled]}
             onPress={startTrip}
@@ -282,25 +360,39 @@ export default function DriverTripScreen() {
           </TouchableOpacity>
         )}
         {tripStatusIsActive(trip?.status) && (
-          <TouchableOpacity
-            style={[styles.secondaryBtn, submitting && styles.btnDisabled]}
-            onPress={() => setConfirmComplete(true)}
-            disabled={submitting}
-            activeOpacity={0.85}
-          >
-            <Ionicons name="flag" size={18} color={theme.colors.primary} />
-            <Text style={styles.secondaryBtnText}>{t('driver_ui.complete_trip')}</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', gap: 10, flex: 1 }}>
+            <TouchableOpacity
+              style={[styles.secondaryBtn, { flex: 1 }, submitting && styles.btnDisabled]}
+              onPress={() => setConfirmComplete(true)}
+              disabled={submitting}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="flag" size={18} color={theme.colors.primary} />
+              <Text style={styles.secondaryBtnText}>{t('driver_ui.complete_trip')}</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.sosBtn, (submitting || sosSending) && styles.btnDisabled]}
+              onPress={() => setConfirmSos(true)}
+              disabled={submitting || sosSending}
+              activeOpacity={0.85}
+              accessibilityLabel="Trigger Emergency SOS"
+            >
+              <Ionicons name="warning" size={18} color="#FFFFFF" />
+              <Text style={styles.sosBtnText}>SOS</Text>
+            </TouchableOpacity>
+          </View>
         )}
       </View>
 
-      <FlatList
+      <DriverTrackingHealth />
+      <TourTarget id="screen.driver-trip.workspace" native><FlatList
         data={stops}
         keyExtractor={(item) => item.stop_id}
         contentContainerStyle={styles.listPad}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         renderItem={({ item }) => {
-          const done = item.status === 'reached' || item.status === 'completed';
+          const done = item.status === 'reached' || item.status === 'completed' || item.status === 'skipped';
           return (
             <View style={[styles.card, done && styles.cardDone]}>
               <View style={styles.cardLeft}>
@@ -321,14 +413,14 @@ export default function DriverTripScreen() {
                   </Text>
                 </View>
               </View>
-              {tripStatusIsActive(trip?.status) && !done && (
+              {tripStatusIsActive(trip?.status) && !done && stops.find(s => !['completed','skipped'].includes(s.status || 'pending'))?.stop_id === item.stop_id && (
                 <TouchableOpacity
                   style={styles.markBtn}
                   onPress={() => markReached(item.stop_id)}
                   disabled={submitting}
                   activeOpacity={0.85}
                 >
-                  <Text style={styles.markBtnText}>{t('driver_ui.mark_reached')}</Text>
+                  <Text style={styles.markBtnText}>{item.status === 'arrived' ? 'Confirm departure' : t('driver_ui.mark_reached')}</Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -336,7 +428,7 @@ export default function DriverTripScreen() {
         }}
         ListEmptyComponent={<Text style={styles.emptySub}>{t('driver_ui.no_stops_on_route')}</Text>}
         ListFooterComponent={<View style={{ height: 110 }} />}
-      />
+      /></TourTarget>
 
       <Modal transparent visible={confirmComplete} animationType="fade">
         <Pressable style={styles.modalBackdrop} onPress={() => setConfirmComplete(false)}>
@@ -357,6 +449,42 @@ export default function DriverTripScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* Emergency SOS Confirmation Modal */}
+      <Modal transparent visible={confirmSos} animationType="fade">
+        <Pressable style={styles.modalBackdrop} onPress={() => !sosSending && setConfirmSos(false)}>
+          <Pressable style={styles.modalCard} onPress={(e) => e.stopPropagation()}>
+            <View style={{ alignItems: 'center', marginBottom: 12 }}>
+              <View style={{ width: 54, height: 54, borderRadius: 27, backgroundColor: '#FEE2E2', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>
+                <Ionicons name="warning" size={32} color="#DC2626" />
+              </View>
+              <Text style={[styles.modalTitle, { color: '#DC2626' }]}>TRIGGER EMERGENCY SOS</Text>
+            </View>
+            <Text style={styles.modalSub}>
+              This will immediately broadcast an urgent emergency alert to the school administration, principal, and transport department with your live vehicle GPS location.
+            </Text>
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.modalCancel}
+                onPress={() => setConfirmSos(false)}
+                disabled={sosSending}
+              >
+                <Text style={styles.modalCancelText}>{t('driver_ui.cancel')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalOk, { backgroundColor: '#DC2626' }]}
+                onPress={triggerSos}
+                disabled={sosSending}
+              >
+                <Text style={{ color: '#fff', fontWeight: '800' }}>
+                  {sosSending ? 'TRANSMITTING...' : 'YES, SEND SOS'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       {disclosureModal}
     </ScreenLayout>
   );
@@ -412,6 +540,22 @@ const getStyles = (theme: any) => StyleSheet.create({
     borderColor: theme.colors.primary + '44',
   },
   secondaryBtnText: { color: theme.colors.primary, fontWeight: '800', fontSize: 15 },
+  sosBtn: {
+    backgroundColor: '#DC2626',
+    borderRadius: 18,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    minHeight: 52,
+  },
+  sosBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '900',
+    fontSize: 15,
+    letterSpacing: 1,
+  },
   btnDisabled: { opacity: 0.6 },
   card: {
     marginHorizontal: 16,

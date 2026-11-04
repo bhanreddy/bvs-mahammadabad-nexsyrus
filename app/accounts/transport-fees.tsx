@@ -1,3 +1,4 @@
+import { TourTarget, TourScrollView } from '@/src/features/app-tour';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import AppTextInput from '@/src/components/AppTextInput';
 import { styles as ds } from '@/src/theme/styles';
@@ -238,6 +239,7 @@ export default function TransportFeesScreen() {
   const [collectModal, setCollectModal] = useState<TransportStudentFee | null>(null);
   const [collectAmount, setCollectAmount] = useState('');
   const [collectMode, setCollectMode] = useState<'cash' | 'upi' | 'cheque'>('cash');
+  const [collectRemarks, setCollectRemarks] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const lastExpandedYear = useRef('');
 
@@ -413,6 +415,7 @@ export default function TransportFeesScreen() {
     setCollectModal(student);
     setCollectAmount(String(student.balance_due ?? ''));
     setCollectMode('cash');
+    setCollectRemarks('');
   };
 
   const handleCollect = async () => {
@@ -435,6 +438,7 @@ export default function TransportFeesScreen() {
         amount,
         payment_method: collectMode,
         transaction_ref: generateUUID(),
+        remarks: collectRemarks.trim() || undefined,
       });
       setCollectModal(null);
       await loadStudents();
@@ -510,10 +514,10 @@ export default function TransportFeesScreen() {
 
   /* ------------------------------------------------------------------ */
   return (
-    <View style={[st.root, { backgroundColor: theme.colors.background }]}>
+    <TourTarget id="screen.accounts-transport-fees.overview" native><View style={[st.root, { backgroundColor: theme.colors.background }]}>
       {!shellActive && <AdminHeader title="Transport Fees" showBackButton />}
 
-      <View style={[st.contentWrap, isWide && st.contentWrapWide]}>
+      <TourTarget id="screen.accounts-transport-fees.workspace" native><View style={[st.contentWrap, isWide && st.contentWrapWide]}>
         <View style={{ width: '100%', maxWidth: contentMaxW, alignSelf: 'center' }}>{renderStickyHeader()}</View>
 
         {loading ? (
@@ -666,7 +670,7 @@ export default function TransportFeesScreen() {
                         )
                       )}
                     </View>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.filterRow}>
+                    <TourScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.filterRow}>
                       <Pressable
                         style={[st.filterChip, !classFilter && st.filterActive]}
                         onPress={() => setClassFilter('')}
@@ -682,7 +686,7 @@ export default function TransportFeesScreen() {
                           <Text style={[st.filterText, classFilter === c.id && st.filterTextActive]}>{c.name}</Text>
                         </Pressable>
                       ))}
-                    </ScrollView>
+                    </TourScrollView>
                   </View>
                 </View>
               }
@@ -750,7 +754,7 @@ export default function TransportFeesScreen() {
               )}
             />
         )}
-      </View>
+      </View></TourTarget>
 
       {/* Fee modal */}
       <Modal visible={!!feeModal} transparent animationType="slide">
@@ -808,6 +812,7 @@ export default function TransportFeesScreen() {
           <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={st.sheetKv}>
             <Pressable style={st.sheet} onPress={() => {}}>
               <View style={st.sheetHandle} />
+              <TourScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
               <View style={st.sheetHeader}>
                 <LinearGradient colors={[C.ok, '#10B981']} style={st.sheetIconBg}>
                   <Ionicons name="cash" size={20} color="#fff" />
@@ -843,6 +848,15 @@ export default function TransportFeesScreen() {
                   </Pressable>
                 ))}
               </View>
+              <Text style={st.fieldLabel}>Remarks</Text>
+              <AppTextInput
+                style={st.remarksInput}
+                multiline
+                value={collectRemarks}
+                onChangeText={setCollectRemarks}
+                placeholder="e.g. Partial for April, receipt note…"
+                placeholderTextColor={C.faint}
+              />
               <Pressable
                 style={[st.primaryBtn, st.collectPrimary]}
                 onPress={handleCollect}
@@ -854,11 +868,12 @@ export default function TransportFeesScreen() {
                   <Text style={st.primaryBtnText}>Collect & generate receipt</Text>
                 )}
               </Pressable>
+              </TourScrollView>
             </Pressable>
           </KeyboardAvoidingView>
         </Pressable>
       </Modal>
-    </View>
+    </View></TourTarget>
   );
 }
 
@@ -1265,6 +1280,18 @@ const st = StyleSheet.create({
     fontSize: 15,
     backgroundColor: '#F8FAFC',
     color: C.ink,
+  },
+  remarksInput: {
+    borderWidth: 1,
+    borderColor: C.line,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    fontSize: 15,
+    backgroundColor: '#F8FAFC',
+    color: C.ink,
+    minHeight: 80,
+    textAlignVertical: 'top',
   },
   cycleRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 },
   payChip: {

@@ -10,6 +10,9 @@ import type {
 } from '../types/models';
 import { sortStudentFeesByConfiguredOrder } from '../utils/feeOrdering';
 import { prepareStudentPhoto, STUDENT_PHOTO_MAX_BYTES } from '../utils/studentPhoto';
+import type { HeroSlideItem } from './schoolHeroSlidesService';
+import type { CelebrationSlideItem } from './celebrationTypes';
+import type { SchoolStoryAuthor } from './schoolStoriesService';
 
 /** Aggregated payload from GET /student/dashboard (one HTTP call for the student home tab). */
 export interface StudentDashboardResponse {
@@ -26,6 +29,9 @@ export interface StudentDashboardResponse {
     };
     upcoming_fee: unknown | null;
     timetable_today: unknown[];
+    unread_notification_count?: number;
+    hero_slides?: Array<HeroSlideItem | CelebrationSlideItem>;
+    school_stories?: SchoolStoryAuthor[];
 }
 
 // API Request/Response types matching Backend logic
@@ -103,6 +109,7 @@ export interface StudentHardDeletePreview {
     payment_transaction_count: number;
     receipt_count: number;
     related_financial_record_count: number;
+    fine_count: number;
     total_due: number;
     total_discount: number;
     total_paid: number;
@@ -384,12 +391,12 @@ export const StudentService = {
     /**
      * Get students without active enrollment
      */
-    getUnenrolledStudents: async (academicYearId?: number): Promise<Student[]> => {
+    getUnenrolledStudents: async (academicYearId?: number, options?: { silent?: boolean }): Promise<Student[]> => {
         let url = '/students/unenrolled';
         if (academicYearId) {
             url += `?academic_year_id=${academicYearId}`;
         }
-        return api.get<Student[]>(url);
+        return api.get<Student[]>(url, undefined, options);
     },
 
     /**

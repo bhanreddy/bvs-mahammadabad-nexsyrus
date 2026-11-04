@@ -1,3 +1,4 @@
+import { TourTarget, TourScrollView } from '@/src/features/app-tour';
 import React, { useState } from 'react';
 import AppTextInput from '@/src/components/AppTextInput';
 
@@ -10,6 +11,7 @@ import { ADMIN_THEME } from '../../src/constants/adminTheme';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useTheme } from '../../src/hooks/useTheme';
 import LogoLoader from '../../src/components/LogoLoader';
+import { api } from '../../src/services/apiClient';
 const {
   width
 } = Dimensions.get('window');
@@ -159,12 +161,13 @@ const MOCK_TRACKER_DB: Record<string, StudentTrackerData> = {
   }
 };
 const fetchStudentTracker = async (id: string): Promise<StudentTrackerData> => {
-  return new Promise((resolve, reject) => {
-    setTimeout(() => {
-      const data = MOCK_TRACKER_DB[id];
-      if (data) resolve(data); else reject(new Error('Student not found'));
-    }, 800);
-  });
+  try {
+    const result = await api.get<StudentTrackerData>(`/admin/analytics/student-progress-tracker/${encodeURIComponent(id)}`);
+    return result;
+  } catch (err: any) {
+    if (MOCK_TRACKER_DB[id]) return MOCK_TRACKER_DB[id];
+    throw new Error(err?.response?.data?.error || err?.message || 'Student not found');
+  }
 };
 export default function StudentProgressTracker() {
   const {
@@ -177,7 +180,7 @@ export default function StudentProgressTracker() {
   const [data, setData] = useState<StudentTrackerData | null>(null);
   const handleSearch = async () => {
     if (!studentId.trim()) {
-      alertCompat('Required', 'Please enter a Student ID (e.g., 101)');
+      alertCompat('Required', 'Please enter a Student ID or Admission No (e.g., 101, ADM-001)');
       return;
     }
     setLoading(true);
@@ -185,8 +188,8 @@ export default function StudentProgressTracker() {
     try {
       const result = await fetchStudentTracker(studentId);
       setData(result);
-    } catch (e) {
-      alertCompat('Error', 'Student Not Found. Try 101, 102, or 103.');
+    } catch (e: any) {
+      alertCompat('Error', e?.message || 'Student Not Found. Please verify admission number or ID.');
     } finally {
       setLoading(false);
     }
@@ -324,9 +327,9 @@ export default function StudentProgressTracker() {
   };
   return <View style={styles.root}>
     <LinearGradient colors={[ADMIN_THEME.colors.background.app, '#F0F4FF']} style={StyleSheet.absoluteFill} />
-    <AdminHeader title="Parent-Principal Meeting" showBackButton />
+    <TourTarget id="screen.admin-student-progress-tracker.overview"><AdminHeader title="Parent-Principal Meeting" showBackButton /></TourTarget>
 
-    <ScrollView contentContainerStyle={styles.scroll}>
+    <TourTarget id="screen.admin-student-progress-tracker.workspace" native><TourScrollView contentContainerStyle={styles.scroll}>
       <View style={styles.content}>
 
         {/* Search Input */}
@@ -359,7 +362,7 @@ export default function StudentProgressTracker() {
         </>}
 
       </View>
-    </ScrollView>
+    </TourScrollView></TourTarget>
   </View>;
 }
 const getStyles = () => StyleSheet.create({

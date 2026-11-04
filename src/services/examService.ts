@@ -4,7 +4,7 @@ import { api } from './apiClient';
 // and session time. Admin generates papers from parameters, edits them, then
 // publishes; student/teacher reads only ever return published timetables.
 
-export type ExamScheduleMode = 'aligned' | 'per_class';
+export type ExamScheduleMode = 'aligned' | 'per_class' | 'per_section';
 export type ExamWeekday =
     | 'monday'
     | 'tuesday'
@@ -12,6 +12,17 @@ export type ExamWeekday =
     | 'thursday'
     | 'friday'
     | 'saturday';
+
+export interface ExamResultReadinessSummary {
+    ready: boolean;
+    publishable: boolean;
+    partial: boolean;
+    papers_total: number;
+    papers_complete: number;
+    expected_entries: number;
+    entered_entries: number;
+    missing_entries: number;
+}
 
 export interface ExamListItem {
     id: string;
@@ -25,6 +36,8 @@ export interface ExamListItem {
     results_published?: boolean;
     results_published_at?: string | null;
     papers_count?: number;
+    scheduled_papers_count?: number;
+    result_readiness?: ExamResultReadinessSummary;
     academic_year?: string;
 }
 
@@ -37,6 +50,7 @@ export interface ExamSyllabusItem {
 export interface ExamPaper {
     id: string;
     class_id: string;
+    class_section_id?: string | null;
     subject_id: string;
     exam_date: string | null;
     start_time: string | null; // "09:30:00"
@@ -44,9 +58,14 @@ export interface ExamPaper {
     max_marks: number;
     passing_marks: number;
     class_name: string;
+    section_name?: string | null;
     subject_name: string;
     subject_name_te?: string | null;
     has_marks: boolean;
+    is_exam_only?: boolean;
+    marks_responsibility?: 'subject_teacher' | 'class_teacher';
+    /** False when an exam-only paper still has a section with no class teacher. */
+    class_teacher_assigned?: boolean | null;
     syllabus?: ExamSyllabusItem[] | null;
     /** True when a subject teacher is assigned (they can self-serve the syllabus). */
     has_teacher?: boolean;
@@ -64,21 +83,35 @@ export interface ExamTimetableDetail {
 
 export interface ExamResultReadinessPaper {
     exam_subject_id: string;
+    class_id: string;
+    subject_id: string;
     class_name: string;
     subject_name: string;
     expected_entries: number;
     entered_entries: number;
     missing_entries: number;
     complete: boolean;
+    pending_teachers: ExamResultReadinessTeacher[];
+    unassigned_sections: ExamResultReadinessSection[];
 }
 
-export interface ExamResultReadiness {
-    ready: boolean;
-    papers_total: number;
-    papers_complete: number;
+export interface ExamResultReadinessSection {
+    section_id: string;
+    section_name: string;
+    /** Set for exam-only papers whose marks belong to the class teacher. */
+    responsibility?: 'class_teacher' | 'subject_teacher';
+}
+
+export interface ExamResultReadinessTeacher {
+    teacher_id: string;
+    teacher_name: string;
+    section_names: string[];
     expected_entries: number;
     entered_entries: number;
     missing_entries: number;
+}
+
+export interface ExamResultReadiness extends ExamResultReadinessSummary {
     papers: ExamResultReadinessPaper[];
 }
 
@@ -112,6 +145,7 @@ export interface ExamSession {
 
 export interface ExamGenerateParams {
     class_ids: string[];
+    class_section_ids?: string[];
     start_date: string;
     end_date: string;
     start_time?: string | null;
@@ -175,6 +209,8 @@ export interface ExamScheduleSlot {
     subject_name_te?: string | null;
     /** teacher read only */
     class_name?: string;
+    class_section_id?: string | null;
+    section_name?: string | null;
     /** teacher read only — true when this paper is the teacher's own subject */
     is_my_subject?: boolean;
     syllabus?: ExamSyllabusItem[] | null;
@@ -199,10 +235,12 @@ export const ExamTimetableService = {
 
     getClassSubjects: async (
         classIds: string[],
-        academicYearId?: string
+        academicYearId?: string,
+        classSectionIds?: string[]
     ): Promise<ClassSubjectOption[]> => {
         return api.get<ClassSubjectOption[]>('/results/exam-timetable/class-subjects', {
-            class_ids: classIds.join(','),
+            ...(classIds && classIds.length > 0 ? { class_ids: classIds.join(',') } : {}),
+            ...(classSectionIds && classSectionIds.length > 0 ? { class_section_ids: classSectionIds.join(',') } : {}),
             ...(academicYearId ? { academic_year_id: academicYearId } : {}),
         });
     },
@@ -227,6 +265,7 @@ export const ExamTimetableService = {
         data: {
             subject_id: string;
             class_id: string;
+            class_section_id?: string | null;
             exam_date?: string;
             start_time?: string;
             end_time?: string;
@@ -243,6 +282,14 @@ export const ExamTimetableService = {
 
     setResultsPublished: async (examId: string, published: boolean): Promise<void> => {
         return api.post(`/results/exams/${examId}/results/publish`, { published }, { silent: true });
+    },
+
+    exportMissingMarks: async (examId: string, examName: string): Promise<void> => {
+        const safeName = examName.replace(/[^A-Za-z0-9_-]+/g, '-');
+        return api.downloadFile(
+            `/results/exams/${examId}/missing-marks/export`,
+            `${safeName || 'exam'}-unuploaded-marks.xlsx`,
+        );
     },
 
     // ── Student / parent ────────────────────────────────────────────────

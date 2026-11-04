@@ -1,3 +1,4 @@
+import { TourTarget, TourScrollView } from '@/src/features/app-tour';
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, RefreshControl, Platform, useWindowDimensions, Modal, SafeAreaView, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -19,6 +20,7 @@ import { useTranslation } from 'react-i18next';
 import { t_field } from '../../src/utils/lang';
 import { alertCompat } from '../../src/utils/crossPlatformAlert';
 import { useFeatureGuard } from '../../src/hooks/useFeatures';
+import ParentFinesSection from '../../src/features/fines/ParentFinesSection';
 export default function FeesScreen() {
   useFeatureGuard('nav.fees'); // deep-link guard: redirect Home if Fees is disabled
   const {
@@ -406,9 +408,9 @@ export default function FeesScreen() {
     </ScreenLayout>;
   }
   return <ScreenLayout>
-    <StudentHeader title={t('fees')} />
+    <TourTarget id="screen.fees.overview"><StudentHeader title={t('fees')} /></TourTarget>
 
-    <ScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.colors.primary} colors={[theme.colors.primary]} progressBackgroundColor={theme.colors.surface} />}>
+    <TourTarget id="screen.fees.workspace" native><TourScrollView contentContainerStyle={styles.scrollContainer} showsVerticalScrollIndicator={false} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.colors.primary} colors={[theme.colors.primary]} progressBackgroundColor={theme.colors.surface} />}>
       <View style={styles.pageContent}>
                 {refreshing &&
       <View style={styles.refreshLoader}>
@@ -416,7 +418,7 @@ export default function FeesScreen() {
                     </View>
       }
       {/* SUMMARY CARD */}
-      <View style={styles.summaryCard}>
+      <TourTarget id="student.fees.summary" native><View style={styles.summaryCard}>
         <View style={[styles.summaryRow, isCompact && styles.summaryRowCompact]}>
           <View style={styles.balanceBlock}>
             <View style={styles.summaryEyebrow}>
@@ -468,7 +470,9 @@ export default function FeesScreen() {
             <Text style={styles.statValue}>{formatCurrency(summary.balance)}</Text>
           </View>
         </View>
-      </View>
+      </View></TourTarget>
+
+      <ParentFinesSection studentId={userProfile?.id || profile?.id || 'me'} />
 
       {/* TABS */}
       <View style={styles.tabContainer}>
@@ -479,7 +483,7 @@ export default function FeesScreen() {
           </Text>
           <View style={[styles.tabCount, activeTab === 'breakdown' && styles.tabCountActive]}><Text style={[styles.tabCountText, activeTab === 'breakdown' && styles.tabCountTextActive]}>{fees.length}</Text></View>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.tab, activeTab === 'history' && styles.activeTab]} onPress={() => {
+        <TourTarget id="student.fees.history" native event="student.fees.history"><TouchableOpacity style={[styles.tab, activeTab === 'history' && styles.activeTab]} onPress={() => {
           setActiveTab('history');
           if (receipts.length === 0) loadReceipts();
         }} accessibilityRole="tab" accessibilityState={{ selected: activeTab === 'history' }}>
@@ -488,11 +492,11 @@ export default function FeesScreen() {
             {t('receipts', 'Receipts')}
           </Text>
           {receipts.length > 0 && <View style={[styles.tabCount, activeTab === 'history' && styles.tabCountActive]}><Text style={[styles.tabCountText, activeTab === 'history' && styles.tabCountTextActive]}>{receipts.length}</Text></View>}
-        </TouchableOpacity>
+        </TouchableOpacity></TourTarget>
       </View>
 
       {/* CONTENT */}
-      <View style={styles.contentSection}>
+      <TourTarget id="student.fees.content" native><View style={styles.contentSection}>
         {activeTab === 'breakdown' ? fees.length === 0 ? <View style={styles.emptyState}><View style={styles.emptyIcon}><Ionicons name="receipt-outline" size={28} color={theme.colors.textMuted} /></View><Text style={styles.emptyTitle}>{t('noFeeRecordsFound', 'No fee records found')}</Text><Text style={styles.emptyText}>{t('noFeeRecordsHint', 'Assigned fees will appear here when they are available.')}</Text></View> : <View style={styles.cardGrid}>{fees.map((item) => <React.Fragment key={item.id}>{renderFeeItem({
             item
           })}</React.Fragment>)}</View> : (/* RECEIPTS LIST */
@@ -520,9 +524,9 @@ export default function FeesScreen() {
               </TouchableOpacity>
             </View>;
         })}</View>)}
+      </View></TourTarget>
       </View>
-      </View>
-    </ScrollView>
+    </TourScrollView></TourTarget>
 
     {preparingPreview && (
       <View style={styles.previewLoadingOverlay} pointerEvents="auto">

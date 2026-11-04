@@ -4,8 +4,10 @@ import { styles as ds } from '@/src/theme/styles';
 
 import {
     View, Text, StyleSheet, TouchableOpacity,
-    Animated, Pressable, Platform, Share, ActivityIndicator, Modal
+    Animated, Pressable, Platform, Share, ActivityIndicator, Modal, useWindowDimensions,
 } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
 import KeyboardAwareScreen from '@/components/keyboard/KeyboardAwareScreen';
 import { alertCompat } from '../../../src/utils/crossPlatformAlert';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -29,93 +31,110 @@ export const generateUUID = () => {
     });
 };
 
+const IS_WEB = Platform.OS === 'web';
+const webCursor = IS_WEB ? ({ cursor: 'pointer' } as const) : null;
+
 const PAYMENT_MODES = [
-    { id: 'Cash', label: 'Cash', icon: '💵' },
-    { id: 'UPI', label: 'UPI', icon: '📲' },
-    { id: 'Cheque', label: 'Cheque', icon: '🏦' },
+    { id: 'Cash', label: 'Cash', hint: 'In hand', icon: 'cash' as const, color: '#059669', soft: '#ECFDF5', softDark: 'rgba(5,150,105,0.16)' },
+    { id: 'UPI', label: 'UPI', hint: 'Show QR', icon: 'qr-code' as const, color: '#4F46E5', soft: '#EEF2FF', softDark: 'rgba(79,70,229,0.18)' },
+    { id: 'Cheque', label: 'Cheque', hint: 'Bank slip', icon: 'reader-outline' as const, color: '#B45309', soft: '#FFFBEB', softDark: 'rgba(180,83,9,0.16)' },
 ];
+
+function feeKindIcon(feeType?: string): React.ComponentProps<typeof Ionicons>['name'] {
+    const label = (feeType || '').toLowerCase();
+    if (/transport|bus/.test(label)) return 'bus';
+    if (/book/.test(label)) return 'book';
+    if (/tuition|academic/.test(label)) return 'school';
+    if (/term|installment|instalment/.test(label)) return 'calendar';
+    if (/exam/.test(label)) return 'document-text';
+    if (/uniform|dress/.test(label)) return 'shirt';
+    if (/lab|science/.test(label)) return 'flask';
+    if (/hostel|boarding/.test(label)) return 'bed';
+    return 'receipt';
+}
+
+function formatInr(n: number | string): string {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '₹0';
+    const hasPaise = Math.round(v * 100) % 100 !== 0;
+    return `₹${v.toLocaleString('en-IN', {
+        minimumFractionDigits: hasPaise ? 2 : 0,
+        maximumFractionDigits: 2,
+    })}`;
+}
 
 // ─── Animated Mode Button ────────────────────────────────────────────────────
 function ModeButton({
-    item, selected, onPress, theme, isDark
+    item, selected, onPress, isDark
 }: {
     item: typeof PAYMENT_MODES[0];
     selected: boolean;
     onPress: () => void;
-    theme: any;
+    theme?: any;
     isDark: boolean;
 }) {
     const scale = useRef(new Animated.Value(1)).current;
-    const bg = useRef(new Animated.Value(selected ? 1 : 0)).current;
-
-    useEffect(() => {
-        Animated.timing(bg, {
-            toValue: selected ? 1 : 0,
-            duration: 200,
-            useNativeDriver: false,
-        }).start();
-    }, [selected]);
-
     const handlePressIn = () => Animated.spring(scale, { toValue: 0.93, useNativeDriver: true }).start();
     const handlePressOut = () => Animated.spring(scale, { toValue: 1, useNativeDriver: true }).start();
 
-    const backgroundColor = bg.interpolate({
-        inputRange: [0, 1],
-        outputRange: [
-            isDark ? 'rgba(255,255,255,0.04)' : '#F8FAFF',
-            isDark ? 'rgba(59,130,246,0.18)' : '#DBEAFE',
-        ],
-    });
-    const borderColor = bg.interpolate({
-        inputRange: [0, 1],
-        outputRange: [
-            isDark ? 'rgba(255,255,255,0.1)' : '#E5E7EB',
-            '#3B82F6',
-        ],
-    });
-
     return (
         <Animated.View style={{ flex: 1, transform: [{ scale }] }}>
-            <Animated.View style={[modeStyles.btn, { backgroundColor, borderColor }]}>
-                <Pressable
-                    style={modeStyles.inner}
-                    onPress={onPress}
-                    onPressIn={handlePressIn}
-                    onPressOut={handlePressOut}
-                >
-                    <Text style={modeStyles.icon}>{item.icon}</Text>
-                    <Text style={[
-                        modeStyles.label,
-                        { color: selected ? '#3B82F6' : (isDark ? 'rgba(255,255,255,0.5)' : '#6B7280') }
-                    ]}>
-                        {item.label}
-                    </Text>
-                    {selected && (
-                        <View style={modeStyles.dot} />
-                    )}
-                </Pressable>
-            </Animated.View>
+            <Pressable
+                accessibilityRole="radio"
+                accessibilityState={{ checked: selected }}
+                style={[
+                    modeStyles.btn,
+                    {
+                        backgroundColor: isDark ? item.softDark : item.soft,
+                        borderColor: selected ? item.color : `${item.color}55`,
+                        borderWidth: selected ? 2 : 1.5,
+                    },
+                ]}
+                onPress={onPress}
+                onPressIn={handlePressIn}
+                onPressOut={handlePressOut}
+            >
+                <View style={[
+                    modeStyles.iconWrap,
+                    { backgroundColor: selected ? item.color : (isDark ? 'rgba(255,255,255,0.08)' : '#FFFFFF') },
+                ]}>
+                    <Ionicons
+                        name={item.icon}
+                        size={20}
+                        color={selected ? '#FFFFFF' : item.color}
+                    />
+                </View>
+                <Text style={[modeStyles.label, { color: item.color }]}>{item.label}</Text>
+                <Text style={[modeStyles.hint, { color: item.color }]}>{item.hint}</Text>
+                {selected ? (
+                    <Ionicons name="checkmark-circle" size={14} color={item.color} />
+                ) : (
+                    <View style={modeStyles.dotSpacer} />
+                )}
+            </Pressable>
         </Animated.View>
     );
 }
 
 const modeStyles = StyleSheet.create({
     btn: {
-        borderWidth: 1.5,
-        borderRadius: 14,
-        overflow: 'hidden',
-    },
-    inner: {
-        paddingVertical: 14,
+        borderRadius: 16,
+        paddingVertical: 12,
+        paddingHorizontal: 6,
         alignItems: 'center',
         gap: 4,
     },
-    icon: { fontSize: 20 },
-    label: { fontSize: 12, fontWeight: '700', letterSpacing: 0.3 },
-    dot: {
-        width: 5, height: 5, borderRadius: 3,
-        backgroundColor: '#3B82F6', marginTop: 2,
+    iconWrap: {
+        width: 40,
+        height: 40,
+        borderRadius: 14,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginBottom: 2,
     },
+    label: { fontSize: 13, fontWeight: '800', letterSpacing: 0.2 },
+    hint: { fontSize: 10, fontWeight: '700', opacity: 0.8 },
+    dotSpacer: { width: 14, height: 14 },
 });
 
 // ─── Main Screen ─────────────────────────────────────────────────────────────
@@ -124,11 +143,29 @@ export default function CollectFeesScreen() {
     const params = useLocalSearchParams();
     const { theme, isDark } = useTheme();
     const { shellActive } = useAccountsWebChrome();
-    const styles = useMemo(() => createStyles(theme, isDark), [theme, isDark]);
+    const { width } = useWindowDimensions();
+    const wide = width >= 980;
+    const styles = useMemo(() => createStyles(theme, isDark, wide), [theme, isDark, wide]);
+
+    const feeId = params.feeId as string;
+    const studentId = params.studentId as string | undefined;
+    const studentName = params.name as string;
+    const admissionNo = params.admissionNo as string;
+    const className = params.className as string | undefined;
+    const sectionName = params.sectionName as string | undefined;
+    const fatherName = params.fatherName as string | undefined;
+    const fatherMobile = params.fatherMobile as string | undefined;
+    const feeType = params.feeType as string;
+    const dueAmount = params.due as string;
+
     const [loading, setLoading] = useState(false);
-    const [amount, setAmount] = useState('');
+    const [amount, setAmount] = useState(() => {
+        const n = parseFloat(dueAmount);
+        return Number.isFinite(n) && n > 0 ? String(n) : '';
+    });
     const [mode, setMode] = useState('Cash');
     const [remarks, setRemarks] = useState('');
+    const [showRemarks, setShowRemarks] = useState(false);
     const [focused, setFocused] = useState(false);
     const [paymentError, setPaymentError] = useState<string | null>(null);
     const [upiLoading, setUpiLoading] = useState(false);
@@ -148,17 +185,6 @@ export default function CollectFeesScreen() {
     const [arrearsRemarks, setArrearsRemarks] = useState('');
     const [arrearsSubmitting, setArrearsSubmitting] = useState(false);
     const [arrearsModalError, setArrearsModalError] = useState<string | null>(null);
-
-    const feeId = params.feeId as string;
-    const studentId = params.studentId as string | undefined;
-    const studentName = params.name as string;
-    const admissionNo = params.admissionNo as string;
-    const className = params.className as string | undefined;
-    const sectionName = params.sectionName as string | undefined;
-    const fatherName = params.fatherName as string | undefined;
-    const fatherMobile = params.fatherMobile as string | undefined;
-    const feeType = params.feeType as string;
-    const dueAmount = params.due as string;
 
     // Entry animations
     const cardAnim = useRef(new Animated.Value(0)).current;
@@ -492,251 +518,280 @@ export default function CollectFeesScreen() {
                 showsVerticalScrollIndicator={false}
                 bottomOffset={24}
             >
-                {/* ── Student Info Card ── */}
-                <Animated.View style={[
-                    styles.infoCard,
-                    {
-                        opacity: cardAnim,
-                        transform: [{
-                            translateY: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] })
-                        }]
-                    }
-                ]}>
-                    {/* Accent stripe */}
-                    <View style={styles.cardAccent} />
-
-                    <View style={styles.cardBody}>
-                        {/* Avatar */}
-                        <View style={styles.avatar}>
-                            <Text style={styles.avatarText}>
-                                {(studentName || 'S').charAt(0).toUpperCase()}
-                            </Text>
-                        </View>
-
-                        <View style={styles.cardInfo}>
-                            <Text style={styles.studentName} numberOfLines={1}>
-                                {studentName || 'Unknown Student'}
-                            </Text>
-                            <View style={styles.tagRow}>
-                                <View style={styles.tag}>
-                                    <Text style={styles.tagText}>#{admissionNo || '—'}</Text>
+                <View style={styles.columns}>
+                    <Animated.View style={[
+                        styles.infoCard,
+                        wide && styles.infoCardWide,
+                        {
+                            opacity: cardAnim,
+                            transform: [{
+                                translateY: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] })
+                            }]
+                        }
+                    ]}>
+                        <LinearGradient
+                            colors={isDark ? ['#1B1464', '#312E81'] : ['#1B1464', '#4C1D95']}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={styles.heroHead}
+                        >
+                            <LinearGradient
+                                colors={['rgba(255,255,255,0.14)', 'rgba(255,255,255,0)']}
+                                start={{ x: 0, y: 0 }}
+                                end={{ x: 0.8, y: 1 }}
+                                style={StyleSheet.absoluteFill}
+                            />
+                            <View style={styles.cardBody}>
+                                <View style={styles.avatar}>
+                                    <Text style={styles.avatarText}>
+                                        {(studentName || 'S').charAt(0).toUpperCase()}
+                                    </Text>
                                 </View>
-                                {feeType ? (
-                                    <View style={[styles.tag, styles.tagBlue]}>
-                                        <Text style={[styles.tagText, { color: '#3B82F6' }]}>
-                                            {feeType}
+                                <View style={styles.cardInfo}>
+                                    <Text style={styles.studentName} numberOfLines={1}>
+                                        {studentName || 'Unknown Student'}
+                                    </Text>
+                                    <View style={styles.metaRow}>
+                                        {admissionNo ? (
+                                            <View style={styles.metaPill}>
+                                                <Ionicons name="id-card" size={12} color="#E9D5FF" />
+                                                <Text style={styles.metaPillText}>{admissionNo}</Text>
+                                            </View>
+                                        ) : null}
+                                        {(className || sectionName) ? (
+                                            <View style={styles.metaPill}>
+                                                <Ionicons name="school" size={12} color="#E9D5FF" />
+                                                <Text style={styles.metaPillText} numberOfLines={1}>
+                                                    {[className, sectionName].filter(Boolean).join(' · ')}
+                                                </Text>
+                                            </View>
+                                        ) : null}
+                                    </View>
+                                </View>
+                            </View>
+                            {feeType ? (
+                                <View style={styles.feeTypeChip}>
+                                    <Ionicons name={feeKindIcon(feeType)} size={13} color="#E9D5FF" />
+                                    <Text style={styles.feeTypeChipText}>{feeType}</Text>
+                                </View>
+                            ) : null}
+                        </LinearGradient>
+
+                        <View style={styles.dueRow}>
+                            <View style={styles.dueBlock}>
+                                <View style={styles.dueLabelRow}>
+                                    <Ionicons name="alert-circle" size={13} color="#DC2626" />
+                                    <Text style={styles.dueLabel}>Due</Text>
+                                </View>
+                                <Text style={styles.dueValue}>{formatInr(dueNum)}</Text>
+                            </View>
+                            <View style={styles.dueSep} />
+                            <View style={styles.dueBlock}>
+                                <View style={styles.dueLabelRow}>
+                                    <Ionicons
+                                        name={remaining <= 0 && amountNum > 0 ? 'checkmark-circle' : (isOverpay ? 'alert-circle' : 'hourglass')}
+                                        size={13}
+                                        color={remaining <= 0 && amountNum > 0 ? '#059669' : (isOverpay ? '#DC2626' : '#D97706')}
+                                    />
+                                    <Text style={styles.dueLabel}>
+                                        {remaining <= 0 && amountNum > 0 ? 'Cleared' : (isOverpay ? 'Over' : 'Left')}
+                                    </Text>
+                                </View>
+                                <Text style={[
+                                    styles.dueValue,
+                                    { color: remaining <= 0 && amountNum > 0 ? '#059669' : (isOverpay ? '#DC2626' : '#D97706') }
+                                ]}>
+                                    {isOverpay ? formatInr(amountNum - dueNum) : formatInr(remaining)}
+                                </Text>
+                            </View>
+                        </View>
+                        {dueNum > 0 ? (
+                            <View style={styles.dueProgressWrap}>
+                                <View style={styles.dueProgressTrack}>
+                                    <View style={[
+                                        styles.dueProgressFill,
+                                        {
+                                            width: `${Math.min(100, Math.max(0, (amountNum / dueNum) * 100))}%` as any,
+                                            backgroundColor: remaining <= 0 && amountNum > 0 ? '#059669' : '#D97706',
+                                        },
+                                    ]} />
+                                </View>
+                                {amountNum > 0 ? (
+                                    <View style={styles.dueStatusRow}>
+                                        <Ionicons
+                                            name={remaining <= 0 ? 'checkmark-circle' : 'pie-chart'}
+                                            size={14}
+                                            color={remaining <= 0 ? '#059669' : '#D97706'}
+                                        />
+                                        <Text style={[
+                                            styles.dueStatusText,
+                                            { color: remaining <= 0 ? '#059669' : '#D97706' },
+                                        ]}>
+                                            {isOverpay ? 'Too much' : remaining <= 0 ? 'Clears this fee' : 'Part payment'}
                                         </Text>
                                     </View>
                                 ) : null}
                             </View>
-                        </View>
-                    </View>
+                        ) : null}
+                    </Animated.View>
 
-                    <View style={styles.dueRow}>
-                        <View style={styles.dueBlock}>
-                            <Text style={styles.dueLabel}>TOTAL DUE</Text>
-                            <Text style={styles.dueValue}>
-                                ₹{parseFloat(dueAmount || '0').toLocaleString('en-IN')}
-                            </Text>
-                        </View>
-                        <View style={styles.dueSep} />
-                        <View style={styles.dueBlock}>
-                            <Text style={styles.dueLabel}>AFTER PAYMENT</Text>
-                            <Text style={[
-                                styles.dueValue,
-                                { color: isReady ? '#10B981' : (isDark ? 'rgba(255,255,255,0.3)' : '#9CA3AF') }
-                            ]}>
-                                ₹{isReady ? remaining.toLocaleString('en-IN') : '—'}
-                            </Text>
-                        </View>
-                    </View>
-                </Animated.View>
-
-                {/* ── Payment Form ── */}
-                <Animated.View style={[
-                    styles.form,
-                    {
-                        opacity: formAnim,
-                        transform: [{
-                            translateY: formAnim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] })
-                        }]
-                    }
-                ]}>
-                    <Text style={styles.sectionTitle}>Payment Details</Text>
-
-                    {/* Amount Input */}
-                    <Text style={styles.inputLabel}>Amount</Text>
-                    <View style={[
-                        styles.amountBox,
-                        focused && styles.amountBoxFocused,
-                        isOverpay && styles.amountBoxError,
+                    <Animated.View style={[
+                        styles.form,
+                        wide && styles.formWide,
+                        {
+                            opacity: formAnim,
+                            transform: [{
+                                translateY: formAnim.interpolate({ inputRange: [0, 1], outputRange: [24, 0] })
+                            }]
+                        }
                     ]}>
-                        <Text style={styles.rupeeSymbol}>₹</Text>
-                        <AppTextInput
-                            style={[ds.inputInChrome, styles.amountInput]}
-                            keyboardType="numeric"
-                            value={amount}
-                            onChangeText={(t) => {
-                                setPaymentError(null);
-                                setAmount(t);
-                            }}
-                            placeholder="0"
-                            placeholderTextColor={isDark ? 'rgba(255,255,255,0.2)' : '#94A3B8'}
-                            onFocus={() => setFocused(true)}
-                            onBlur={() => setFocused(false)}
-                        />
-                        {isReady && (
-                            <View style={styles.fullPayBadge}>
-                                <Text style={styles.fullPayText}>
-                                    {amountNum === dueNum ? 'FULL' : 'PARTIAL'}
-                                </Text>
+                        <View style={styles.formHeader}>
+                            <View style={styles.formHeaderIcon}>
+                                <Ionicons name="cash" size={16} color="#059669" />
+                            </View>
+                            <Text style={styles.sectionTitle}>Take payment</Text>
+                        </View>
+
+                        <View style={styles.labelRow}>
+                            <Ionicons name="wallet" size={14} color={isDark ? '#6EE7B7' : '#059669'} />
+                            <Text style={[styles.inputLabel, styles.inputLabelInline]}>Amount</Text>
+                        </View>
+                        <View style={[
+                            styles.amountBox,
+                            focused && styles.amountBoxFocused,
+                            isOverpay && styles.amountBoxError,
+                        ]}>
+                            <Text style={styles.rupeeSymbol}>₹</Text>
+                            <AppTextInput
+                                style={[ds.inputInChrome, styles.amountInput]}
+                                keyboardType="numeric"
+                                value={amount}
+                                onChangeText={(t) => {
+                                    setPaymentError(null);
+                                    setAmount(t);
+                                }}
+                                placeholder="0"
+                                placeholderTextColor={isDark ? 'rgba(255,255,255,0.2)' : '#94A3B8'}
+                                onFocus={() => setFocused(true)}
+                                onBlur={() => setFocused(false)}
+                            />
+                            {isReady && (
+                                <View style={[styles.fullPayBadge, amountNum < dueNum && styles.partialPayBadge]}>
+                                    <Ionicons
+                                        name={amountNum === dueNum ? 'checkmark' : 'pie-chart'}
+                                        size={11}
+                                        color="#FFFFFF"
+                                    />
+                                    <Text style={styles.fullPayText}>
+                                        {amountNum === dueNum ? 'Full' : 'Part'}
+                                    </Text>
+                                </View>
+                            )}
+                        </View>
+                        {isOverpay && (
+                            <Text style={styles.errorHint}>
+                                Exceeds due by {formatInr(amountNum - dueNum)}
+                            </Text>
+                        )}
+
+                        {dueNum > 0 && (
+                            <View style={styles.chipRow}>
+                                {[
+                                    { ratio: 0.5, label: 'Half', icon: 'pie-chart' as const },
+                                    { ratio: 1, label: 'Full', icon: 'checkmark-circle' as const },
+                                ].map((choice) => {
+                                    const val = choice.ratio === 1 ? dueNum : Math.round(dueNum * choice.ratio);
+                                    const active = choice.ratio === 1
+                                        ? amountNum === dueNum
+                                        : amountNum === val && val !== dueNum;
+                                    const isFull = choice.ratio === 1;
+                                    return (
+                                        <TouchableOpacity
+                                            key={choice.label}
+                                            style={[
+                                                styles.chip,
+                                                isFull ? styles.chipFull : styles.chipHalf,
+                                                active && (isFull ? styles.chipActive : styles.chipActivePartial),
+                                                webCursor,
+                                            ]}
+                                            onPress={() => {
+                                                setPaymentError(null);
+                                                setAmount(String(val));
+                                            }}
+                                        >
+                                            <Ionicons
+                                                name={choice.icon}
+                                                size={16}
+                                                color={active || isFull ? (isFull ? '#059669' : '#D97706') : (isDark ? '#94A3B8' : '#64748B')}
+                                            />
+                                            <Text style={[
+                                                styles.chipText,
+                                                active && (isFull ? styles.chipTextActive : styles.chipTextPartial),
+                                                !active && isFull && styles.chipTextActive,
+                                            ]}>
+                                                {choice.label}
+                                            </Text>
+                                            <Text
+                                                style={[
+                                                    styles.chipAmount,
+                                                    active && (isFull ? styles.chipTextActive : styles.chipTextPartial),
+                                                    !active && isFull && styles.chipTextActive,
+                                                ]}
+                                                numberOfLines={1}
+                                            >
+                                                {formatInr(val)}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    );
+                                })}
                             </View>
                         )}
-                    </View>
-                    {isOverpay && (
-                        <Text style={styles.errorHint}>
-                            ⚠ Exceeds due amount by ₹{(amountNum - dueNum).toLocaleString('en-IN')}
-                        </Text>
-                    )}
 
-                    {/* Quick-fill chips */}
-                    {dueNum > 0 && (
-                        <View style={styles.chipRow}>
-                            {[0.25, 0.5, 0.75, 1].map((ratio) => {
-                                const val = Math.round(dueNum * ratio);
-                                const label = ratio === 1 ? 'Full' : `${ratio * 100}%`;
-                                return (
-                                    <TouchableOpacity
-                                        key={ratio}
-                                        style={[
-                                            styles.chip,
-                                            amountNum === val && styles.chipActive,
-                                        ]}
-                                        onPress={() => {
-                                            setPaymentError(null);
-                                            setAmount(String(val));
-                                        }}
-                                    >
-                                        <Text style={[
-                                            styles.chipText,
-                                            amountNum === val && styles.chipTextActive,
-                                        ]}>
-                                            {label}
-                                        </Text>
-                                    </TouchableOpacity>
-                                );
-                            })}
+                        <View style={styles.labelRow}>
+                            <Ionicons name="card" size={14} color={isDark ? '#C4B5FD' : '#4F46E5'} />
+                            <Text style={[styles.inputLabel, styles.inputLabelInline]}>How they pay</Text>
                         </View>
-                    )}
-
-                    {/* Payment Mode */}
-                    <Text style={[styles.inputLabel, { marginTop: 4 }]}>Payment Mode</Text>
-                    <View style={styles.modeRow}>
-                        {PAYMENT_MODES.map((m) => (
-                            <ModeButton
-                                key={m.id}
-                                item={m}
-                                selected={mode === m.id}
-                                onPress={() => {
-                                    setPaymentError(null);
-                                    setMode(m.id);
-                                }}
-                                theme={theme}
-                                isDark={isDark}
-                            />
-                        ))}
-                    </View>
-
-                    {/* Remarks */}
-                    <Text style={styles.inputLabel}>Remarks</Text>
-                    <AppTextInput
-                        style={styles.remarksInput}
-                        multiline
-                        value={remarks}
-                        onChangeText={(t) => {
-                            setPaymentError(null);
-                            setRemarks(t);
-                        }}
-                        placeholder="e.g. Receipt no. 1234, partial for Q1…"
-                        placeholderTextColor={isDark ? 'rgba(255,255,255,0.2)' : '#94A3B8'}
-                    />
-                </Animated.View>
-
-                {/* ── Previous Year Pending Fees ── */}
-                <View style={arrearsStyles.section}>
-                    <View style={arrearsStyles.headerRow}>
-                        <Text style={arrearsStyles.headerTitle}>Previous Year Pending Fees</Text>
-                    </View>
-
-                    {arrearsLoading ? (
-                        <>
-                            <View style={arrearsStyles.skeletonRow} />
-                            <View style={arrearsStyles.skeletonRow} />
-                        </>
-                    ) : arrearsError ? (
-                        <TouchableOpacity style={arrearsStyles.errorRow} onPress={loadArrears} activeOpacity={0.7}>
-                            <Text style={arrearsStyles.errorText}>Could not load previous dues. Tap to retry.</Text>
-                        </TouchableOpacity>
-                    ) : arrears.length === 0 ? (
-                        <View style={arrearsStyles.emptyRow}>
-                            <Text style={arrearsStyles.emptyCheck}>✓</Text>
-                            <Text style={arrearsStyles.emptyText}>No previous year dues</Text>
+                        <View style={styles.modeRow}>
+                            {PAYMENT_MODES.map((m) => (
+                                <ModeButton
+                                    key={m.id}
+                                    item={m}
+                                    selected={mode === m.id}
+                                    onPress={() => {
+                                        setPaymentError(null);
+                                        setMode(m.id);
+                                    }}
+                                    theme={theme}
+                                    isDark={isDark}
+                                />
+                            ))}
                         </View>
-                    ) : (
-                        arrears.map((due) => {
-                            const isPartial = due.status === 'partially_paid';
-                            const balanceColor = isPartial ? '#D97706' : '#DC2626';
-                            return (
-                                <View key={due.id} style={arrearsStyles.dueRow}>
-                                    <View style={arrearsStyles.dueTopRow}>
-                                        <View style={arrearsStyles.yearBadge}>
-                                            <Text style={arrearsStyles.yearBadgeText}>{due.due_academic_year}</Text>
-                                        </View>
-                                        <View style={[
-                                            arrearsStyles.statusBadge,
-                                            { backgroundColor: isPartial ? '#FEF3C7' : '#FEE2E2' },
-                                        ]}>
-                                            <Text style={[arrearsStyles.statusBadgeText, { color: balanceColor }]}>
-                                                {isPartial ? 'PARTIAL' : 'UNPAID'}
-                                            </Text>
-                                        </View>
-                                    </View>
 
-                                    <View style={arrearsStyles.amountGrid}>
-                                        <View style={arrearsStyles.amountCell}>
-                                            <Text style={arrearsStyles.amountLabel}>Total Due</Text>
-                                            <Text style={arrearsStyles.amountValue}>
-                                                ₹{Number(due.original_amount).toLocaleString('en-IN')}
-                                            </Text>
-                                        </View>
-                                        <View style={arrearsStyles.amountCell}>
-                                            <Text style={arrearsStyles.amountLabel}>Paid</Text>
-                                            <Text style={arrearsStyles.amountValue}>
-                                                ₹{Number(due.paid_amount).toLocaleString('en-IN')}
-                                            </Text>
-                                        </View>
-                                        <View style={arrearsStyles.amountCell}>
-                                            <Text style={arrearsStyles.amountLabel}>Balance</Text>
-                                            <Text style={[arrearsStyles.balanceValue, { color: balanceColor }]}>
-                                                ₹{Number(due.balance).toLocaleString('en-IN')}
-                                            </Text>
-                                        </View>
-                                    </View>
-
-                                    <TouchableOpacity
-                                        style={arrearsStyles.collectBtn}
-                                        onPress={() => openArrearsCollect(due)}
-                                        activeOpacity={0.85}
-                                    >
-                                        <Text style={arrearsStyles.collectBtnText}>Collect ▶</Text>
-                                    </TouchableOpacity>
-                                </View>
-                            );
-                        })
-                    )}
+                        {showRemarks || remarks.length > 0 ? (
+                            <>
+                                <Text style={styles.inputLabel}>Note</Text>
+                                <AppTextInput
+                                    style={styles.remarksInput}
+                                    multiline
+                                    value={remarks}
+                                    onChangeText={(t) => {
+                                        setPaymentError(null);
+                                        setRemarks(t);
+                                    }}
+                                    placeholder="Optional — e.g. partial for Q1"
+                                    placeholderTextColor={isDark ? 'rgba(255,255,255,0.2)' : '#94A3B8'}
+                                />
+                            </>
+                        ) : (
+                            <Pressable style={[styles.addNoteBtn, webCursor]} onPress={() => setShowRemarks(true)}>
+                                <Ionicons name="create-outline" size={16} color={isDark ? '#A5B4FC' : '#6366F1'} />
+                                <Text style={styles.addNoteText}>Add a note</Text>
+                            </Pressable>
+                        )}
+                    </Animated.View>
                 </View>
 
-                {/* ── Summary + CTA ── */}
+                {/* ── Pay now. Old dues stay below so they don't block this fee. ── */}
                 <Animated.View style={[
                     {
                         opacity: btnAnim,
@@ -745,73 +800,68 @@ export default function CollectFeesScreen() {
                         }]
                     }
                 ]}>
-                    {isReady && (
-                        <View style={styles.summaryCard}>
-                            <SummaryRow label="Student" value={studentName || '—'} />
-                            <SummaryRow label="Amount" value={`₹${amountNum.toLocaleString('en-IN')}`} highlight />
-                            <SummaryRow label="Mode" value={mode} />
-                            <SummaryRow label="Balance After" value={`₹${remaining.toLocaleString('en-IN')}`} />
-                        </View>
-                    )}
-
                     {mode === 'UPI' && isReady ? (
                         <View style={styles.upiQrSection}>
-                            <Text style={styles.upiQrTitle}>Pay via UPI</Text>
-                            <Text style={styles.upiQrSub}>
-                                Show this QR to the payer. Amount and note update when you change the fields above.
-                            </Text>
+                            <View style={styles.upiQrHead}>
+                                <View style={styles.upiQrIcon}>
+                                    <Ionicons name="qr-code" size={18} color="#4F46E5" />
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={styles.upiQrTitle}>Show this QR</Text>
+                                    <Text style={styles.upiQrSub}>Parent scans. Then tap Collect.</Text>
+                                </View>
+                            </View>
                             {upiLoading ? (
                                 <View style={styles.upiQrCenter}>
-                                    <ActivityIndicator color="#3B82F6" />
-                                    <Text style={styles.upiQrMuted}>Loading school UPI…</Text>
+                                    <ActivityIndicator color="#4F46E5" />
+                                    <Text style={styles.upiQrMuted}>Loading UPI…</Text>
                                 </View>
                             ) : upiLoadError ? (
                                 <View style={styles.upiQrWarn}>
+                                    <Ionicons name="alert-circle" size={16} color="#DC2626" />
                                     <Text style={styles.upiQrWarnText}>{upiLoadError}</Text>
                                     <TouchableOpacity onPress={() => setUpiFetchTick((n) => n + 1)} style={{ marginTop: 10 }}>
                                         <Text style={styles.upiQrLink}>Retry</Text>
                                     </TouchableOpacity>
                                     <TouchableOpacity onPress={() => setMode('Cash')}>
-                                        <Text style={[styles.upiQrLink, { marginTop: 6 }]}>Use Cash / Cheque instead</Text>
+                                        <Text style={[styles.upiQrLink, { marginTop: 6 }]}>Use Cash</Text>
                                     </TouchableOpacity>
                                 </View>
                             ) : !schoolUpiId || !schoolPayeeName ? (
                                 <View style={styles.upiQrWarn}>
+                                    <Ionicons name="alert-circle" size={16} color="#D97706" />
                                     <Text style={styles.upiQrWarnText}>
-                                        School UPI is not set. An admin must configure it under Admin → UPI fee settings.
+                                        UPI is not set. Use Cash or Cheque.
                                     </Text>
                                 </View>
                             ) : !inrAmountStr ? (
-                                <Text style={styles.upiQrMuted}>Enter a valid amount to generate the QR.</Text>
+                                <Text style={styles.upiQrMuted}>Enter an amount to show the QR.</Text>
                             ) : (
                                 <>
                                     <View style={styles.upiQrFrame}>
                                         <QRCode value={upiPayUri} size={200} color="#0f172a" backgroundColor="#FFFFFF" />
                                     </View>
                                     <View style={styles.upiQrMeta}>
-                                        <Text style={styles.upiQrMetaLine}>
-                                            <Text style={styles.upiQrMetaLab}>UPI ID </Text>
-                                            {schoolUpiId}
-                                        </Text>
-                                        <Text style={styles.upiQrMetaLine}>
-                                            <Text style={styles.upiQrMetaLab}>Amount </Text>₹{inrAmountStr}
-                                        </Text>
-                                        {remarks.trim() ? (
-                                            <Text style={styles.upiQrMetaLine} numberOfLines={2}>
-                                                <Text style={styles.upiQrMetaLab}>Note </Text>
-                                                {remarks.trim()}
-                                            </Text>
-                                        ) : null}
+                                        <View style={styles.upiMetaRow}>
+                                            <Ionicons name="at" size={14} color={isDark ? '#FCD34D' : '#B45309'} />
+                                            <Text style={styles.upiQrMetaLine}>{schoolUpiId}</Text>
+                                        </View>
+                                        <View style={styles.upiMetaRow}>
+                                            <Ionicons name="cash" size={14} color="#059669" />
+                                            <Text style={styles.upiQrMetaLine}>₹{inrAmountStr}</Text>
+                                        </View>
                                     </View>
                                     <TouchableOpacity
                                         style={styles.upiShareBtn}
                                         onPress={() => Share.share({ message: upiPayUri, title: 'UPI payment' }).catch(() => { })}
                                     >
-                                        <Text style={styles.upiShareBtnText}>Share UPI link</Text>
+                                        <Ionicons name="share-social" size={15} color="#4F46E5" />
+                                        <Text style={styles.upiShareBtnText}>Share link</Text>
                                     </TouchableOpacity>
-                                    <Text style={styles.upiLedgerHint}>
-                                        After payment appears in the school UPI account, tap the green button below to record it in the fee ledger.
-                                    </Text>
+                                    <View style={styles.upiHintRow}>
+                                        <Ionicons name="checkmark-circle" size={14} color="#059669" />
+                                        <Text style={styles.upiLedgerHint}>Money in? Tap the green button.</Text>
+                                    </View>
                                 </>
                             )}
                         </View>
@@ -819,14 +869,143 @@ export default function CollectFeesScreen() {
 
                     {paymentError ? (
                         <View style={[styles.errorBanner, { borderColor: isDark ? 'rgba(248,113,113,0.5)' : '#FECACA', backgroundColor: isDark ? 'rgba(239,68,68,0.12)' : '#FEF2F2' }]}>
+                            <Ionicons name="alert-circle" size={16} color={isDark ? '#FECACA' : '#991B1B'} />
                             <Text style={[styles.errorBannerText, { color: isDark ? '#FECACA' : '#991B1B' }]}>{paymentError}</Text>
                         </View>
                     ) : null}
 
+                    {!wide ? (
+                        <TouchableOpacity
+                            style={[
+                                styles.payBtn,
+                                isPartialPayment && isReady && styles.payBtnPartial,
+                                (!isReady || loading || (mode === 'UPI' && !upiQrReady)) && styles.payBtnDisabled,
+                                webCursor,
+                            ]}
+                            onPress={handleCollect}
+                            disabled={!isReady || loading || (mode === 'UPI' && !upiQrReady)}
+                            activeOpacity={0.85}
+                        >
+                            {loading ? (
+                                <LogoLoader color="#fff" />
+                            ) : (
+                                <View style={styles.payBtnInner}>
+                                    <Ionicons
+                                        name={!isReady ? 'wallet-outline' : mode === 'UPI' ? 'qr-code' : 'checkmark-circle'}
+                                        size={18}
+                                        color={(!isReady || (mode === 'UPI' && !upiQrReady)) ? (isDark ? '#94A3B8' : '#64748B') : '#FFFFFF'}
+                                    />
+                                    <Text style={[
+                                        styles.payBtnText,
+                                        (!isReady || (mode === 'UPI' && !upiQrReady)) && styles.payBtnTextDisabled,
+                                    ]}>
+                                        {!isReady
+                                            ? 'Enter amount'
+                                            : `Collect ${formatInr(amountNum)}`}
+                                    </Text>
+                                </View>
+                            )}
+                        </TouchableOpacity>
+                    ) : null}
+                </Animated.View>
+
+                {!arrearsLoading && !arrearsError && arrears.length === 0 ? (
+                    <View style={arrearsStyles.clearChip}>
+                        <Ionicons name="checkmark-circle" size={16} color="#059669" />
+                        <Text style={arrearsStyles.clearText}>No old dues</Text>
+                    </View>
+                ) : (
+                    <View style={arrearsStyles.section}>
+                        <View style={arrearsStyles.headerRow}>
+                            <Ionicons name="time" size={16} color={isDark ? '#FCD34D' : '#B45309'} />
+                            <Text style={arrearsStyles.headerTitle}>Old dues</Text>
+                        </View>
+
+                        {arrearsLoading ? (
+                            <>
+                                <View style={arrearsStyles.skeletonRow} />
+                                <View style={arrearsStyles.skeletonRow} />
+                            </>
+                        ) : arrearsError ? (
+                            <TouchableOpacity style={arrearsStyles.errorRow} onPress={loadArrears} activeOpacity={0.7}>
+                                <Ionicons name="refresh" size={16} color={isDark ? '#FECACA' : '#991B1B'} />
+                                <Text style={arrearsStyles.errorText}>Could not load. Tap to retry.</Text>
+                            </TouchableOpacity>
+                        ) : (
+                            arrears.map((due) => {
+                                const isPartial = due.status === 'partially_paid';
+                                const balanceColor = isPartial ? '#D97706' : '#DC2626';
+                                return (
+                                    <View key={due.id} style={arrearsStyles.dueRow}>
+                                        <View style={arrearsStyles.dueTopRow}>
+                                            <View style={arrearsStyles.yearBadge}>
+                                                <Ionicons name="calendar" size={13} color="#B45309" />
+                                                <Text style={arrearsStyles.yearBadgeText}>{due.due_academic_year}</Text>
+                                            </View>
+                                            <View style={[
+                                                arrearsStyles.statusBadge,
+                                                { backgroundColor: isPartial ? '#FEF3C7' : '#FEE2E2' },
+                                            ]}>
+                                                <Ionicons
+                                                    name={isPartial ? 'pie-chart' : 'alert-circle'}
+                                                    size={12}
+                                                    color={balanceColor}
+                                                />
+                                                <Text style={[arrearsStyles.statusBadgeText, { color: balanceColor }]}>
+                                                    {isPartial ? 'Part' : 'Unpaid'}
+                                                </Text>
+                                            </View>
+                                        </View>
+                                        <Text style={[arrearsStyles.balanceHero, { color: balanceColor }]}>
+                                            {formatInr(due.balance)}
+                                        </Text>
+                                        <Text style={arrearsStyles.balanceCaption}>
+                                            of {formatInr(due.original_amount)} · paid {formatInr(due.paid_amount)}
+                                        </Text>
+                                        <TouchableOpacity
+                                            style={arrearsStyles.collectBtn}
+                                            onPress={() => openArrearsCollect(due)}
+                                            activeOpacity={0.85}
+                                        >
+                                            <Ionicons name="cash" size={16} color="#FFFFFF" />
+                                            <Text style={arrearsStyles.collectBtnText}>
+                                                Take {formatInr(due.balance)}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    </View>
+                                );
+                            })
+                        )}
+                    </View>
+                )}
+
+                <View style={{ height: wide ? 128 : 28 }} />
+            </KeyboardAwareScreen>
+
+            {wide ? (
+                <View style={styles.stickyBar}>
+                    <View style={styles.stickyMode}>
+                        <Ionicons
+                            name={(PAYMENT_MODES.find((item) => item.id === mode) || PAYMENT_MODES[0]).icon}
+                            size={18}
+                            color={(PAYMENT_MODES.find((item) => item.id === mode) || PAYMENT_MODES[0]).color}
+                        />
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                        <Text style={styles.stickyLabel}>
+                            {remaining <= 0 && isReady ? 'Clears this fee' : isReady ? `${formatInr(remaining)} left` : mode}
+                        </Text>
+                        <Text style={styles.stickyAmount} numberOfLines={1}>
+                            {isReady ? formatInr(amountNum) : 'Enter an amount'}
+                        </Text>
+                    </View>
                     <TouchableOpacity
                         style={[
                             styles.payBtn,
+                            styles.stickyPayBtn,
+                            isPartialPayment && isReady && styles.payBtnPartial,
                             (!isReady || loading || (mode === 'UPI' && !upiQrReady)) && styles.payBtnDisabled,
+                            webCursor,
                         ]}
                         onPress={handleCollect}
                         disabled={!isReady || loading || (mode === 'UPI' && !upiQrReady)}
@@ -836,23 +1015,22 @@ export default function CollectFeesScreen() {
                             <LogoLoader color="#fff" />
                         ) : (
                             <View style={styles.payBtnInner}>
-                                <Text style={styles.payBtnText}>
-                                    {!isReady
-                                        ? 'Enter Amount to Continue'
-                                        : mode === 'UPI'
-                                            ? `Record ₹${amountNum.toLocaleString('en-IN')} to ledger`
-                                            : `Collect ₹${amountNum.toLocaleString('en-IN')}`}
+                                <Ionicons
+                                    name={!isReady ? 'wallet-outline' : 'checkmark-circle'}
+                                    size={18}
+                                    color={(!isReady || (mode === 'UPI' && !upiQrReady)) ? '#94A3B8' : '#FFFFFF'}
+                                />
+                                <Text style={[
+                                    styles.payBtnText,
+                                    (!isReady || (mode === 'UPI' && !upiQrReady)) && styles.payBtnTextDisabled,
+                                ]}>
+                                    {!isReady ? 'Enter amount' : `Collect ${formatInr(amountNum)}`}
                                 </Text>
-                                {isReady && (mode !== 'UPI' || upiQrReady) ? (
-                                    <Text style={styles.payBtnArrow}>→</Text>
-                                ) : null}
                             </View>
                         )}
                     </TouchableOpacity>
-                </Animated.View>
-
-                <View style={{ height: 32 }} />
-            </KeyboardAwareScreen>
+                </View>
+            ) : null}
 
             {/* ── Arrears Collection Modal ── */}
             <Modal
@@ -868,15 +1046,33 @@ export default function CollectFeesScreen() {
                 >
                     <Pressable style={arrearsStyles.modalSheet} onPress={(e) => e.stopPropagation()}>
                         <View style={arrearsStyles.modalHandle} />
-                        <Text style={arrearsStyles.modalTitle}>Collect Arrears</Text>
+                        <View style={arrearsStyles.modalTitleRow}>
+                            <Ionicons name="time" size={18} color="#B45309" />
+                            <Text style={arrearsStyles.modalTitle}>Old dues</Text>
+                        </View>
                         {selectedArrear ? (
-                            <Text style={arrearsStyles.modalSubtitle}>
-                                {studentName || 'Student'} · {selectedArrear.due_academic_year} · Balance ₹
-                                {arrearsBalance.toLocaleString('en-IN')}
-                            </Text>
+                            <View style={arrearsStyles.modalChipRow}>
+                                <View style={arrearsStyles.modalChip}>
+                                    <Ionicons name="person" size={12} color="#4F46E5" />
+                                    <Text style={arrearsStyles.modalChipText}>{studentName || 'Student'}</Text>
+                                </View>
+                                <View style={arrearsStyles.modalChip}>
+                                    <Ionicons name="calendar" size={12} color="#B45309" />
+                                    <Text style={arrearsStyles.modalChipText}>{selectedArrear.due_academic_year}</Text>
+                                </View>
+                                <View style={[arrearsStyles.modalChip, arrearsStyles.modalChipDue]}>
+                                    <Ionicons name="alert-circle" size={12} color="#DC2626" />
+                                    <Text style={[arrearsStyles.modalChipText, { color: '#BE123C' }]}>
+                                        {formatInr(arrearsBalance)}
+                                    </Text>
+                                </View>
+                            </View>
                         ) : null}
 
-                        <Text style={arrearsStyles.modalLabel}>Amount (max ₹{arrearsBalance.toLocaleString('en-IN')})</Text>
+                        <View style={arrearsStyles.modalLabelRow}>
+                            <Ionicons name="wallet" size={14} color="#B45309" />
+                            <Text style={arrearsStyles.modalLabel}>Amount · max {formatInr(arrearsBalance)}</Text>
+                        </View>
                         <View style={[arrearsStyles.modalAmountBox, arrearsOverpay && arrearsStyles.modalAmountBoxError]}>
                             <Text style={arrearsStyles.modalRupee}>₹</Text>
                             <AppTextInput
@@ -888,12 +1084,18 @@ export default function CollectFeesScreen() {
                             />
                         </View>
                         {arrearsOverpay ? (
-                            <Text style={arrearsStyles.modalErrorHint}>
-                                ⚠ Exceeds balance by ₹{(arrearsAmountNum - arrearsBalance).toLocaleString('en-IN')}
-                            </Text>
+                            <View style={arrearsStyles.modalErrorHintRow}>
+                                <Ionicons name="alert-circle" size={13} color="#DC2626" />
+                                <Text style={arrearsStyles.modalErrorHint}>
+                                    Over by {formatInr(arrearsAmountNum - arrearsBalance)}
+                                </Text>
+                            </View>
                         ) : null}
 
-                        <Text style={arrearsStyles.modalLabel}>Payment Mode</Text>
+                        <View style={arrearsStyles.modalLabelRow}>
+                            <Ionicons name="card" size={14} color="#4F46E5" />
+                            <Text style={arrearsStyles.modalLabel}>How they pay</Text>
+                        </View>
                         <View style={arrearsStyles.modalModeRow}>
                             {PAYMENT_MODES.map((m) => (
                                 <ModeButton
@@ -907,7 +1109,10 @@ export default function CollectFeesScreen() {
                             ))}
                         </View>
 
-                        <Text style={arrearsStyles.modalLabel}>Remarks (optional)</Text>
+                        <View style={arrearsStyles.modalLabelRow}>
+                            <Ionicons name="create-outline" size={14} color="#64748B" />
+                            <Text style={arrearsStyles.modalLabel}>Note</Text>
+                        </View>
                         <AppTextInput
                             style={arrearsStyles.modalRemarks}
                             multiline
@@ -934,7 +1139,14 @@ export default function CollectFeesScreen() {
                             {arrearsSubmitting ? (
                                 <ActivityIndicator color="#fff" />
                             ) : (
-                                <Text style={arrearsStyles.modalSubmitText}>Collect & generate receipt</Text>
+                                <View style={arrearsStyles.modalSubmitInner}>
+                                    <Ionicons name="checkmark-circle" size={18} color="#FFFFFF" />
+                                    <Text style={arrearsStyles.modalSubmitText}>
+                                        {arrearsAmountNum > 0 && !arrearsOverpay
+                                            ? `Take ${formatInr(arrearsAmountNum)}`
+                                            : 'Enter amount'}
+                                    </Text>
+                                </View>
                             )}
                         </TouchableOpacity>
                     </Pressable>
@@ -944,22 +1156,6 @@ export default function CollectFeesScreen() {
     );
 }
 
-// ─── Summary Row Helper ───────────────────────────────────────────────────────
-function SummaryRow({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
-    return (
-        <View style={summaryStyles.row}>
-            <Text style={summaryStyles.label}>{label}</Text>
-            <Text style={[summaryStyles.value, highlight && summaryStyles.highlight]}>{value}</Text>
-        </View>
-    );
-}
-const summaryStyles = StyleSheet.create({
-    row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 7 },
-    label: { fontSize: 13, color: '#6B7280', fontWeight: '500' },
-    value: { fontSize: 13, color: '#374151', fontWeight: '600' },
-    highlight: { color: '#10B981', fontSize: 15, fontWeight: '700' },
-});
-
 // ─── Previous Year Pending Fees Styles ────────────────────────────────────────
 const createArrearsStyles = (isDark: boolean) => {
     const cardBg = isDark ? 'rgba(255,255,255,0.04)' : '#FFFFFF';
@@ -968,7 +1164,7 @@ const createArrearsStyles = (isDark: boolean) => {
     const valueColor = isDark ? 'rgba(255,255,255,0.85)' : '#374151';
     return StyleSheet.create({
         section: {
-            marginTop: 18,
+        marginTop: 8,
             backgroundColor: cardBg,
             borderRadius: 16,
             borderLeftWidth: 4,
@@ -977,7 +1173,20 @@ const createArrearsStyles = (isDark: boolean) => {
             borderColor: border,
             padding: 16,
         },
-        headerRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 14 },
+        clearChip: {
+            flexDirection: 'row',
+            alignItems: 'center',
+            alignSelf: 'flex-start',
+            gap: 8,
+            paddingHorizontal: 12,
+            paddingVertical: 8,
+            borderRadius: 999,
+            backgroundColor: isDark ? 'rgba(16,185,129,0.12)' : '#ECFDF5',
+            borderWidth: 1,
+            borderColor: isDark ? 'rgba(16,185,129,0.28)' : '#A7F3D0',
+        },
+        clearText: { fontSize: 13, fontWeight: '800', color: isDark ? '#6EE7B7' : '#047857' },
+        headerRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
         headerTitle: { fontSize: 15, fontWeight: '800', color: isDark ? '#FCD34D' : '#B45309', letterSpacing: 0.2 },
         skeletonRow: {
             height: 92,
@@ -989,6 +1198,10 @@ const createArrearsStyles = (isDark: boolean) => {
         emptyCheck: { fontSize: 14, color: isDark ? 'rgba(255,255,255,0.4)' : '#9CA3AF', fontWeight: '700' },
         emptyText: { fontSize: 13, color: isDark ? 'rgba(255,255,255,0.4)' : '#9CA3AF' },
         errorRow: {
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 8,
             paddingVertical: 14,
             paddingHorizontal: 12,
             borderRadius: 12,
@@ -1007,22 +1220,37 @@ const createArrearsStyles = (isDark: boolean) => {
         },
         dueTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
         yearBadge: {
-            backgroundColor: isDark ? 'rgba(59,130,246,0.18)' : '#EFF6FF',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 5,
+            backgroundColor: isDark ? 'rgba(245,158,11,0.16)' : '#FFFBEB',
             paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8,
         },
-        yearBadgeText: { fontSize: 13, fontWeight: '800', color: '#3B82F6' },
-        statusBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
-        statusBadgeText: { fontSize: 11, fontWeight: '800', letterSpacing: 0.4 },
+        yearBadgeText: { fontSize: 13, fontWeight: '800', color: isDark ? '#FCD34D' : '#B45309' },
+        statusBadge: {
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 4,
+            paddingHorizontal: 10,
+            paddingVertical: 4,
+            borderRadius: 999,
+        },
+        statusBadgeText: { fontSize: 11, fontWeight: '800', letterSpacing: 0.3 },
+        balanceHero: { fontSize: 22, fontWeight: '800', letterSpacing: -0.4 },
+        balanceCaption: { fontSize: 12, fontWeight: '600', color: labelColor, marginTop: 2, marginBottom: 12 },
         amountGrid: { flexDirection: 'row', marginBottom: 12 },
         amountCell: { flex: 1 },
         amountLabel: { fontSize: 11, color: labelColor, marginBottom: 2, fontWeight: '500' },
         amountValue: { fontSize: 14, color: valueColor, fontWeight: '700' },
         balanceValue: { fontSize: 14, fontWeight: '800' },
         collectBtn: {
-            backgroundColor: '#F59E0B',
-            borderRadius: 10,
-            paddingVertical: 11,
+            flexDirection: 'row',
             alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            backgroundColor: '#D97706',
+            borderRadius: 12,
+            paddingVertical: 12,
         },
         collectBtnText: { color: '#FFFFFF', fontWeight: '800', fontSize: 13, letterSpacing: 0.3 },
         // Modal
@@ -1038,9 +1266,29 @@ const createArrearsStyles = (isDark: boolean) => {
             width: 40, height: 4, borderRadius: 2, alignSelf: 'center',
             backgroundColor: isDark ? 'rgba(255,255,255,0.2)' : '#E5E7EB', marginBottom: 14,
         },
+        modalTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
         modalTitle: { fontSize: 18, fontWeight: '800', color: isDark ? '#FFFFFF' : '#0F172A' },
-        modalSubtitle: { fontSize: 13, color: labelColor, marginTop: 4, marginBottom: 8 },
-        modalLabel: { fontSize: 13, fontWeight: '600', color: valueColor, marginTop: 14, marginBottom: 6 },
+        modalChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 },
+        modalChip: {
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 4,
+            paddingHorizontal: 8,
+            paddingVertical: 4,
+            borderRadius: 999,
+            backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : '#F8FAFC',
+            borderWidth: 1,
+            borderColor: isDark ? 'rgba(255,255,255,0.08)' : '#E2E8F0',
+        },
+        modalChipDue: {
+            backgroundColor: isDark ? 'rgba(220,38,38,0.14)' : '#FFF1F2',
+            borderColor: isDark ? 'rgba(220,38,38,0.35)' : '#FECDD3',
+        },
+        modalChipText: { fontSize: 12, fontWeight: '700', color: isDark ? '#E2E8F0' : '#334155', flexShrink: 1 },
+        modalLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 14, marginBottom: 6 },
+        modalLabel: { fontSize: 13, fontWeight: '700', color: valueColor },
+        modalErrorHintRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 6 },
+        modalSubmitInner: { flexDirection: 'row', alignItems: 'center', gap: 8 },
         modalAmountBox: {
             flexDirection: 'row', alignItems: 'center',
             borderWidth: 1.5, borderColor: isDark ? 'rgba(255,255,255,0.12)' : '#E5E7EB',
@@ -1049,7 +1297,7 @@ const createArrearsStyles = (isDark: boolean) => {
         modalAmountBoxError: { borderColor: '#DC2626' },
         modalRupee: { fontSize: 18, fontWeight: '700', color: labelColor, marginRight: 6 },
         modalAmountInput: { flex: 1, fontSize: 18, fontWeight: '700', paddingVertical: 12, color: valueColor },
-        modalErrorHint: { fontSize: 12, color: '#DC2626', marginTop: 6, fontWeight: '600' },
+        modalErrorHint: { fontSize: 12, color: '#DC2626', fontWeight: '700' },
         modalModeRow: { flexDirection: 'row', gap: 10 },
         modalRemarks: {
             borderWidth: 1.5, borderColor: isDark ? 'rgba(255,255,255,0.12)' : '#E5E7EB',
@@ -1072,32 +1320,50 @@ const createArrearsStyles = (isDark: boolean) => {
 };
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
-const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
+const createStyles = (theme: any, isDark: boolean, wide = false) => StyleSheet.create({
     container: {
         flex: 1,
         backgroundColor: 'transparent',
     },
     content: {
-        padding: 16,
-        gap: 14,
+        padding: wide ? 22 : 16,
+        paddingBottom: wide ? 140 : 16,
+        gap: 16,
+        maxWidth: 1120,
+        width: '100%',
+        alignSelf: 'center',
+    },
+    columns: {
+        flexDirection: wide ? 'row' : 'column',
+        gap: 16,
+        alignItems: wide ? 'flex-start' : 'stretch',
     },
 
     // ── Info Card ──
     infoCard: {
-        backgroundColor: isDark ? '#1C1F2A' : '#FFFFFF',
-        borderRadius: 20,
+        backgroundColor: isDark ? '#1A2130' : '#FFFFFF',
+        borderRadius: 24,
         overflow: 'hidden',
         borderWidth: 1,
-        borderColor: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)',
+        borderColor: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(76,90,120,0.08)',
         ...Platform.select({
             ios: {
-                shadowColor: '#2563EB',
-                shadowOffset: { width: 0, height: 6 },
-                shadowOpacity: isDark ? 0.3 : 0.1,
-                shadowRadius: 16,
+                shadowColor: '#1B1464',
+                shadowOffset: { width: 0, height: 8 },
+                shadowOpacity: isDark ? 0.3 : 0.12,
+                shadowRadius: 18,
             },
             android: { elevation: 5 },
         }),
+    },
+    infoCardWide: {
+        flex: 1,
+        minWidth: 0,
+    },
+    heroHead: {
+        paddingHorizontal: 18,
+        paddingTop: 18,
+        paddingBottom: 16,
     },
     cardAccent: {
         height: 4,
@@ -1106,29 +1372,69 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
     cardBody: {
         flexDirection: 'row',
         alignItems: 'center',
-        padding: 18,
-        paddingBottom: 14,
         gap: 14,
     },
     avatar: {
         width: 52,
         height: 52,
-        borderRadius: 16,
-        backgroundColor: isDark ? 'rgba(59,130,246,0.2)' : '#DBEAFE',
+        borderRadius: 18,
+        backgroundColor: 'rgba(255,255,255,0.14)',
         alignItems: 'center',
         justifyContent: 'center',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.22)',
     },
     avatarText: {
         fontSize: 22,
         fontWeight: '800',
-        color: '#3B82F6',
+        color: '#F8FAFC',
     },
-    cardInfo: { flex: 1 },
+    cardInfo: { flex: 1, minWidth: 0 },
     studentName: {
-        fontSize: 17,
+        fontSize: 18,
+        fontWeight: '800',
+        color: '#F8FAFC',
+        marginBottom: 4,
+        letterSpacing: -0.3,
+    },
+    metaRow: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        gap: 6,
+    },
+    metaPill: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        maxWidth: '100%',
+        paddingHorizontal: 8,
+        paddingVertical: 3,
+        borderRadius: 999,
+        backgroundColor: 'rgba(255,255,255,0.12)',
+    },
+    metaPillText: {
+        flexShrink: 1,
+        fontSize: 11,
         fontWeight: '700',
-        color: isDark ? '#F9FAFB' : '#111827',
-        marginBottom: 6,
+        color: '#F3E8FF',
+    },
+    feeTypeChip: {
+        alignSelf: 'flex-start',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        marginTop: 14,
+        paddingHorizontal: 10,
+        paddingVertical: 6,
+        borderRadius: 999,
+        backgroundColor: 'rgba(255,255,255,0.12)',
+        borderWidth: 1,
+        borderColor: 'rgba(255,255,255,0.16)',
+    },
+    feeTypeChipText: {
+        fontSize: 12,
+        fontWeight: '800',
+        color: '#E9D5FF',
     },
     tagRow: { flexDirection: 'row', gap: 6 },
     tag: {
@@ -1148,36 +1454,68 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
     },
     dueRow: {
         flexDirection: 'row',
-        borderTopWidth: 1,
-        borderTopColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)',
-        marginHorizontal: 18,
-        paddingVertical: 14,
+        paddingHorizontal: 18,
+        paddingTop: 16,
+        paddingBottom: 8,
     },
-    dueBlock: { flex: 1, alignItems: 'center' },
+    dueBlock: { flex: 1 },
     dueSep: {
         width: 1,
-        backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)',
+        backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.07)',
+        marginHorizontal: 12,
+    },
+    dueLabelRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        marginBottom: 6,
     },
     dueLabel: {
-        fontSize: 10,
-        fontWeight: '700',
-        letterSpacing: 1,
-        color: isDark ? 'rgba(255,255,255,0.3)' : '#9CA3AF',
-        marginBottom: 4,
+        fontSize: 11,
+        fontWeight: '800',
+        letterSpacing: 0.4,
+        color: isDark ? 'rgba(255,255,255,0.5)' : '#64748B',
+        textTransform: 'uppercase',
     },
     dueValue: {
-        fontSize: 20,
+        fontSize: 22,
         fontWeight: '800',
-        color: '#EF4444',
+        color: '#DC2626',
+        letterSpacing: -0.4,
+    },
+    dueProgressWrap: {
+        paddingHorizontal: 18,
+        paddingBottom: 18,
+        gap: 8,
+    },
+    dueProgressTrack: {
+        height: 8,
+        borderRadius: 99,
+        backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : '#EEF2FF',
+        overflow: 'hidden',
+    },
+    dueProgressFill: {
+        height: '100%',
+        borderRadius: 99,
+        backgroundColor: '#059669',
+    },
+    dueStatusRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+    },
+    dueStatusText: {
+        fontSize: 12,
+        fontWeight: '800',
     },
 
     // ── Form ──
     form: {
-        backgroundColor: isDark ? '#1C1F2A' : '#FFFFFF',
-        borderRadius: 20,
+        backgroundColor: isDark ? '#1A2130' : '#FFFFFF',
+        borderRadius: 24,
         padding: 20,
         borderWidth: 1,
-        borderColor: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)',
+        borderColor: isDark ? 'rgba(255,255,255,0.07)' : 'rgba(76,90,120,0.08)',
         gap: 4,
         ...Platform.select({
             ios: {
@@ -1189,20 +1527,51 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
             android: { elevation: 3 },
         }),
     },
+    formWide: {
+        flex: 1.12,
+    },
+    formHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        marginBottom: 14,
+    },
+    formHeaderIcon: {
+        width: 32,
+        height: 32,
+        borderRadius: 10,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: isDark ? 'rgba(16,185,129,0.16)' : '#ECFDF5',
+    },
     sectionTitle: {
-        fontSize: 16,
+        fontSize: 18,
         fontWeight: '800',
-        color: isDark ? '#F9FAFB' : '#111827',
-        marginBottom: 16,
-        letterSpacing: 0.2,
+        color: isDark ? '#F8FAFC' : '#0F172A',
+        letterSpacing: -0.3,
+    },
+    sectionHint: {
+        fontSize: 13,
+        fontWeight: '500',
+        color: isDark ? 'rgba(255,255,255,0.45)' : '#64748B',
+        lineHeight: 18,
+    },
+    labelRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        marginBottom: 8,
     },
     inputLabel: {
         fontSize: 12,
-        fontWeight: '700',
-        letterSpacing: 0.8,
-        color: isDark ? 'rgba(255,255,255,0.4)' : '#6B7280',
+        fontWeight: '800',
+        letterSpacing: 0.6,
+        color: isDark ? 'rgba(255,255,255,0.5)' : '#64748B',
         marginBottom: 8,
         textTransform: 'uppercase',
+    },
+    inputLabelInline: {
+        marginBottom: 0,
     },
 
     // ── Amount Input ──
@@ -1217,8 +1586,8 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
         marginBottom: 10,
     },
     amountBoxFocused: {
-        borderColor: '#3B82F6',
-        backgroundColor: isDark ? 'rgba(59,130,246,0.06)' : '#F0F7FF',
+        borderColor: '#059669',
+        backgroundColor: isDark ? 'rgba(5,150,105,0.08)' : '#ECFDF5',
     },
     amountBoxError: {
         borderColor: '#EF4444',
@@ -1238,10 +1607,16 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
         paddingVertical: 14,
     },
     fullPayBadge: {
-        backgroundColor: '#10B981',
-        paddingHorizontal: 8,
-        paddingVertical: 4,
-        borderRadius: 6,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        backgroundColor: '#059669',
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+        borderRadius: 999,
+    },
+    partialPayBadge: {
+        backgroundColor: '#D97706',
     },
     fullPayText: {
         fontSize: 10,
@@ -1265,24 +1640,48 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
     },
     chip: {
         flex: 1,
-        paddingVertical: 7,
-        borderRadius: 8,
+        paddingVertical: 12,
+        paddingHorizontal: 8,
+        borderRadius: 16,
         alignItems: 'center',
-        backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : '#F3F4F6',
-        borderWidth: 1,
-        borderColor: 'transparent',
+        backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : '#F8FAFC',
+        borderWidth: 1.5,
+        borderColor: isDark ? 'rgba(255,255,255,0.08)' : '#E2E8F0',
+        gap: 2,
+    },
+    chipHalf: {
+        borderColor: isDark ? 'rgba(217,119,6,0.35)' : '#FDE68A',
+        backgroundColor: isDark ? 'rgba(217,119,6,0.08)' : '#FFFDF5',
+    },
+    chipFull: {
+        borderColor: isDark ? 'rgba(5,150,105,0.4)' : '#A7F3D0',
+        backgroundColor: isDark ? 'rgba(5,150,105,0.1)' : '#F0FDF4',
     },
     chipActive: {
-        backgroundColor: isDark ? 'rgba(59,130,246,0.15)' : '#EFF6FF',
-        borderColor: '#3B82F6',
+        backgroundColor: isDark ? 'rgba(5,150,105,0.2)' : '#ECFDF5',
+        borderColor: '#059669',
+        borderWidth: 2,
+    },
+    chipActivePartial: {
+        backgroundColor: isDark ? 'rgba(217,119,6,0.18)' : '#FFFBEB',
+        borderColor: '#D97706',
+        borderWidth: 2,
     },
     chipText: {
+        fontSize: 13,
+        fontWeight: '800',
+        color: isDark ? 'rgba(255,255,255,0.7)' : '#334155',
+    },
+    chipAmount: {
         fontSize: 12,
         fontWeight: '700',
-        color: isDark ? 'rgba(255,255,255,0.4)' : '#6B7280',
+        color: isDark ? 'rgba(255,255,255,0.55)' : '#64748B',
     },
     chipTextActive: {
-        color: '#3B82F6',
+        color: '#059669',
+    },
+    chipTextPartial: {
+        color: '#D97706',
     },
 
     // ── Mode Row ──
@@ -1305,6 +1704,18 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
         textAlignVertical: 'top',
         marginBottom: 4,
     },
+    addNoteBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        paddingVertical: 10,
+        alignSelf: 'flex-start',
+    },
+    addNoteText: {
+        fontSize: 13,
+        fontWeight: '700',
+        color: isDark ? '#A5B4FC' : '#4F46E5',
+    },
 
     // ── Summary ──
     summaryCard: {
@@ -1318,24 +1729,34 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
 
     // ── Pay Button ──
     payBtn: {
-        backgroundColor: '#10B981',
-        paddingVertical: 17,
+        backgroundColor: '#059669',
+        paddingVertical: 16,
         borderRadius: 16,
         alignItems: 'center',
         ...Platform.select({
             ios: {
-                shadowColor: '#10B981',
+                shadowColor: '#059669',
                 shadowOffset: { width: 0, height: 6 },
-                shadowOpacity: 0.4,
+                shadowOpacity: 0.35,
                 shadowRadius: 12,
             },
             android: { elevation: 6 },
         }),
     },
+    stickyPayBtn: {
+        paddingHorizontal: 22,
+        minWidth: 220,
+    },
+    payBtnPartial: {
+        backgroundColor: '#D97706',
+    },
     payBtnDisabled: {
         backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : '#E5E7EB',
         shadowOpacity: 0,
         elevation: 0,
+    },
+    payBtnTextDisabled: {
+        color: isDark ? '#94A3B8' : '#64748B',
     },
     payBtnInner: {
         flexDirection: 'row',
@@ -1353,13 +1774,62 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
         fontSize: 18,
         fontWeight: '600',
     },
+    stickyBar: {
+        position: 'absolute',
+        left: 16,
+        right: 16,
+        bottom: 16,
+        maxWidth: 1088,
+        width: '100%',
+        alignSelf: 'center',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 16,
+        paddingVertical: 14,
+        paddingHorizontal: 18,
+        borderRadius: 20,
+        backgroundColor: isDark ? '#0F172A' : '#111827',
+        ...Platform.select({
+            ios: {
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 10 },
+                shadowOpacity: 0.28,
+                shadowRadius: 18,
+            },
+            android: { elevation: 10 },
+        }),
+    },
+    stickyMode: {
+        width: 36,
+        height: 36,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'rgba(255,255,255,0.08)',
+    },
+    stickyLabel: {
+        fontSize: 12,
+        fontWeight: '600',
+        color: 'rgba(255,255,255,0.55)',
+        marginBottom: 2,
+    },
+    stickyAmount: {
+        fontSize: 22,
+        fontWeight: '800',
+        color: '#FFFFFF',
+        letterSpacing: -0.4,
+    },
     errorBanner: {
+        flexDirection: 'row',
+        alignItems: 'flex-start',
+        gap: 8,
         marginBottom: 12,
         padding: 14,
         borderRadius: 14,
         borderWidth: 1,
     },
     errorBannerText: {
+        flex: 1,
         fontSize: 14,
         lineHeight: 20,
         fontWeight: '600',
@@ -1370,23 +1840,37 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
         borderRadius: 18,
         backgroundColor: isDark ? '#1C1F2A' : '#FFFFFF',
         borderWidth: 1,
-        borderColor: isDark ? 'rgba(245,158,11,0.25)' : '#FDE68A',
+        borderColor: isDark ? 'rgba(79,70,229,0.35)' : '#C7D2FE',
+    },
+    upiQrHead: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        marginBottom: 14,
+    },
+    upiQrIcon: {
+        width: 36,
+        height: 36,
+        borderRadius: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: isDark ? 'rgba(79,70,229,0.2)' : '#EEF2FF',
     },
     upiQrTitle: {
         fontSize: 16,
         fontWeight: '800',
-        color: isDark ? '#FBBF24' : '#B45309',
-        marginBottom: 6,
+        color: isDark ? '#C7D2FE' : '#3730A3',
     },
     upiQrSub: {
-        fontSize: 13,
-        lineHeight: 19,
-        color: isDark ? 'rgba(255,255,255,0.55)' : '#6B7280',
-        marginBottom: 16,
+        fontSize: 12,
+        lineHeight: 16,
+        marginTop: 2,
+        color: isDark ? 'rgba(255,255,255,0.55)' : '#64748B',
+        fontWeight: '600',
     },
     upiQrCenter: { alignItems: 'center', paddingVertical: 24, gap: 10 },
     upiQrMuted: { fontSize: 13, color: isDark ? 'rgba(255,255,255,0.45)' : '#6B7280' },
-    upiQrWarn: { paddingVertical: 8 },
+    upiQrWarn: { paddingVertical: 8, gap: 6 },
     upiQrWarnText: { fontSize: 13, lineHeight: 20, color: '#F87171', fontWeight: '600' },
     upiQrLink: { marginTop: 10, fontSize: 13, fontWeight: '700', color: '#3B82F6' },
     upiQrFrame: {
@@ -1401,22 +1885,28 @@ const createStyles = (theme: any, isDark: boolean) => StyleSheet.create({
             default: {},
         }),
     },
-    upiQrMeta: { marginBottom: 12, gap: 6 },
-    upiQrMetaLine: { fontSize: 13, color: isDark ? '#E5E7EB' : '#374151', fontWeight: '600' },
+    upiQrMeta: { marginBottom: 12, gap: 8 },
+    upiMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+    upiQrMetaLine: { flex: 1, fontSize: 13, color: isDark ? '#E5E7EB' : '#374151', fontWeight: '700' },
     upiQrMetaLab: { fontWeight: '700', color: isDark ? 'rgba(251,191,36,0.9)' : '#B45309' },
     upiShareBtn: {
         alignSelf: 'flex-start',
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
         paddingVertical: 10,
         paddingHorizontal: 14,
         borderRadius: 10,
-        backgroundColor: isDark ? 'rgba(59,130,246,0.2)' : '#EFF6FF',
+        backgroundColor: isDark ? 'rgba(79,70,229,0.2)' : '#EEF2FF',
         marginBottom: 12,
     },
-    upiShareBtnText: { fontSize: 13, fontWeight: '800', color: '#3B82F6' },
+    upiShareBtnText: { fontSize: 13, fontWeight: '800', color: '#4F46E5' },
+    upiHintRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
     upiLedgerHint: {
+        flex: 1,
         fontSize: 12,
         lineHeight: 18,
-        color: isDark ? 'rgba(255,255,255,0.5)' : '#6B7280',
-        fontStyle: 'italic' as const,
+        color: isDark ? '#6EE7B7' : '#047857',
+        fontWeight: '700',
     },
 });

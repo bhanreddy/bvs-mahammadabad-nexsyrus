@@ -1,14 +1,15 @@
+import { AppTourHeaderButton, TourTarget } from '@/src/features/app-tour';
 import React from 'react';
 import { View, Text, StyleSheet, Platform, useWindowDimensions } from 'react-native';
 import { Feather, Ionicons } from '@expo/vector-icons';
 import * as Haptics from '../utils/haptics';
-import { useRouter } from 'expo-router';
+import { usePathname, useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { ADMIN_THEME } from '../constants/adminTheme';
 import { schoolColorWithAlpha } from '../constants/schoolConfig';
 import { SCHOOL_NAME } from '../constants/school';
 import ClayIconButton from './ClayIconButton';
-import { AdminAppSearchTrigger, AdminAppSearchIconButton } from './AdminAppSearch';
+import { AdminAppSearchIconButton } from './AdminAppSearch';
 
 import Animated, { SharedValue, useAnimatedStyle, interpolateColor, interpolate, Extrapolation } from 'react-native-reanimated';
 import { useTheme } from '../hooks/useTheme';
@@ -16,6 +17,7 @@ import { useAuth } from '../hooks/useAuth';
 
 interface AdminHeaderProps {
     title: string;
+    hideTitle?: boolean;
     showMenuButton?: boolean;
     showProfileButton?: boolean;
     showBackButton?: boolean;
@@ -34,17 +36,20 @@ const isWeb = Platform.OS === 'web';
 
 const AdminHeader: React.FC<AdminHeaderProps> = ({
     title = SCHOOL_NAME,
+    hideTitle = false,
     showMenuButton = true,
     showProfileButton = true,
     showBackButton = false,
-    showNotification = false,
+    showNotification = true,
     hideAppSearch = false,
     rightAction,
     scrollY,
     onMenuPress
 }) => {
     const router = useRouter();
-    const { user } = useAuth();
+    const pathname = usePathname();
+    const showAppSearch = pathname === '/admin/dashboard' && !hideAppSearch;
+    const { user, role } = useAuth();
     const { isDark } = useTheme();
     const { width: windowWidth } = useWindowDimensions();
     const isWideWeb = isWeb && windowWidth >= 768;
@@ -174,7 +179,7 @@ const AdminHeader: React.FC<AdminHeaderProps> = ({
             isWideWeb && styles.containerWideZ,
             animatedStyle
         ]}>
-            <View style={[styles.content, { paddingHorizontal: horizontalPad, height: headerContentHeight }]}>
+            <TourTarget id={pathname?.startsWith('/accounts/') ? 'accounts.navigation' : 'admin.navigation'} native><View style={[styles.content, { paddingHorizontal: horizontalPad, height: headerContentHeight }]}>
                 <View
                     style={[
                         styles.leftContainer,
@@ -207,26 +212,20 @@ const AdminHeader: React.FC<AdminHeaderProps> = ({
                     ) : null}
                 </View>
 
-                {isWideWeb ? (
-                    <View style={[styles.centerCluster, hideAppSearch && styles.centerClusterStart]}>
+                <View style={[styles.centerCluster, isWideWeb && styles.centerClusterStart]}>
+                    {!hideTitle ? (
                         <Text style={[
                             styles.title,
-                            styles.titleWide,
-                            !hideAppSearch && styles.titleWithSearch,
-                            hideAppSearch && styles.titleWideAlone,
+                            isWideWeb && styles.titleWide,
+                            isWideWeb && styles.titleWideAlone,
                             { color: textPrimary },
                         ]} numberOfLines={1}>{title}</Text>
-                        {!hideAppSearch ? <AdminAppSearchTrigger /> : null}
-                    </View>
-                ) : (
-                    <Text style={[
-                        styles.title,
-                        { color: textPrimary },
-                    ]} numberOfLines={1}>{title}</Text>
-                )}
+                    ) : null}
+                </View>
 
                 <View style={styles.rightContainer}>
-                    {!isWideWeb && isWeb && !hideAppSearch ? (
+                    <AppTourHeaderButton />
+                    {showAppSearch ? (
                         <AdminAppSearchIconButton isDark={isDark} accent={accent} />
                     ) : null}
                     {rightAction && (
@@ -246,7 +245,11 @@ const AdminHeader: React.FC<AdminHeaderProps> = ({
                         <ClayIconButton
                             onPress={() => {
                                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                                router.push('/admin/notifications' as any);
+                                router.push(
+                                    (role === 'admin' || role === 'principal'
+                                        ? '/admin/notifications'
+                                        : '/notifications') as any
+                                );
                             }}
                             isDark={isDark}
                             accent={accent}
@@ -261,7 +264,7 @@ const AdminHeader: React.FC<AdminHeaderProps> = ({
                         </ClayIconButton>
                     )}
                 </View>
-            </View>
+            </View></TourTarget>
             {isWideWeb ? (
                 <>
                     <View
@@ -322,14 +325,6 @@ const styles = StyleSheet.create({
         fontWeight: '800',
         letterSpacing: 0.35,
         fontSize: 17,
-    },
-    titleWithSearch: {
-        flex: 0,
-        flexShrink: 1,
-        marginHorizontal: 0,
-        marginRight: 8,
-        textAlign: 'left',
-        maxWidth: 220,
     },
     titleWideAlone: {
         flex: 1,

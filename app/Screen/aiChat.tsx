@@ -1,3 +1,4 @@
+import { TourTarget } from '@/src/features/app-tour';
 import React, { useState, useRef, useEffect } from "react";
 import AppTextInput from '@/src/components/AppTextInput';
 import { styles as ds } from '@/src/theme/styles';
@@ -24,7 +25,7 @@ type Message = {
 // --- Components ---
 
 // 1. Message Bubble Component 
-const MessageBubble = React.memo(({ item }: { item: Message; }) => {
+const MessageBubble = React.memo(function MessageBubble({ item }: { item: Message; }) {
   const isUser = item.sender === 'user';
 
   return (
@@ -169,10 +170,10 @@ export default function AIChatScreen() {
         <MaterialIcons name="auto-awesome" size={48} color="#4F46E5" />
       </View>
       <Text style={styles.emptyTitle}>Hi, Student! 👋</Text>
-      <Text style={styles.emptySubtitle}>I'm your AI study assistant. Ask me anything about your subjects.</Text>
+      <Text style={styles.emptySubtitle}>I&apos;m your AI study assistant. Ask me anything about your subjects.</Text>
       <View style={styles.suggestionContainer}>
         <TouchableOpacity style={styles.suggestionChip} onPress={() => setInput("Explain Newton's laws")}>
-          <Text style={styles.suggestionText}>🍎 Explain Newton's laws</Text>
+          <Text style={styles.suggestionText}>🍎 Explain Newton&apos;s laws</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.suggestionChip} onPress={() => setInput("Solve a quadratic equation")}>
           <Text style={styles.suggestionText}>➗ Solve quadratic equation</Text>
@@ -185,13 +186,13 @@ export default function AIChatScreen() {
 
   return (
     <ScreenLayout>
-      <StudentHeader showBackButton={true} title="AI Assistant" />
+      <TourTarget id="screen.screen-ai-chat.overview"><StudentHeader showBackButton={true} title="AI Assistant" /></TourTarget>
       <KeyboardAwareScreen
         variant="fixed"
         style={styles.container}
         stickyContent={
           <View style={styles.inputWrapper}>
-            <View style={[styles.inputContainer, ds.searchBarWrapper]}>
+            <TourTarget id="screen.screen-ai-chat.workspace" native><View style={[styles.inputContainer, ds.searchBarWrapper]}>
               <AppTextInput
                 placeholder="Ask a doubt..."
                 style={[ds.inputInChrome, styles.input]}
@@ -210,7 +211,7 @@ export default function AIChatScreen() {
 
                 <Ionicons name="arrow-up" size={24} color="#FFF" />
               </TouchableOpacity>
-            </View>
+            </View></TourTarget>
             <Text style={styles.disclaimer}>AI can make mistakes. Check important info.</Text>
           </View>
         }

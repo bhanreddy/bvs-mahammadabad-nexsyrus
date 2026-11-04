@@ -606,8 +606,6 @@ export default function Index() {
     <View style={[styles.screen, { backgroundColor: C.screenBg }]}>
       <StatusBar
         barStyle={C.isDark ? "light-content" : "dark-content"}
-        translucent
-        backgroundColor="transparent"
       />
 
       {/* Ambient layered background — flat canvas; gradient kept for layout parity */}
@@ -893,6 +891,26 @@ export default function Index() {
                 </LinearGradient>
               </Pressable>
             </Animated.View>
+
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Apply for admission"
+              onPress={() => router.push("/admission/enquiry")}
+              style={{
+                marginBottom: s(18),
+                paddingVertical: 12,
+                paddingHorizontal: 16,
+                borderRadius: 16,
+                borderWidth: 1,
+                borderColor: C.isDark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.08)",
+                backgroundColor: C.isDark ? "rgba(255,255,255,0.06)" : "#FFFFFF",
+              }}
+            >
+              <Text style={{ fontWeight: "700", color: C.pD, fontSize: 15 }}>Apply for Admission</Text>
+              <Text style={{ color: C.isDark ? "#CBD5E1" : "#475569", marginTop: 2, fontSize: 13 }}>
+                Start an enquiry without creating a student account
+              </Text>
+            </Pressable>
 
             {/* The supplied student artwork now breaks through the top-left
                 edge like the reference instead of floating inside the card. */}

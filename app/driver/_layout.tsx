@@ -45,6 +45,14 @@ export default function DriverLayout() {
                 name="profile"
                 options={{ title: t('driver_ui.profile') }}
             />
+            <MaterialTopTabs.Screen
+                name="updates"
+                options={{ title: 'Updates', swipeEnabled: false, lazy: true } as any}
+            />
+            <MaterialTopTabs.Screen
+                name="calendar"
+                options={{ title: 'Calendar', swipeEnabled: false, lazy: true, headerShown: false } as any}
+            />
         </MaterialTopTabs>
     );
 }

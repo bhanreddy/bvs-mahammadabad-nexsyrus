@@ -1,3 +1,4 @@
+import { TourTarget } from '@/src/features/app-tour';
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
@@ -15,7 +16,9 @@ import {
 import { alertCompat } from '../../src/utils/crossPlatformAlert';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as Crypto from 'expo-crypto';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { useTheme } from '../../src/hooks/useTheme';
 import AdminHeader from '../../src/components/AdminHeader';
 import LogoLoader from '../../src/components/LogoLoader';
@@ -24,8 +27,14 @@ import Animated, {
   useSharedValue,
   useAnimatedScrollHandler,
 } from 'react-native-reanimated';
-import { api } from '../../src/services/apiClient';
+import { api, APIError } from '../../src/services/apiClient';
+import { useAuth } from '../../src/hooks/useAuth';
+import type { ValidatedUser } from '../../src/types/auth';
 import AppDatePicker, { toYMD } from '../../src/components/AppDatePicker';
+import StaffAttendanceCorrectionModal from '../../src/components/admin/StaffAttendanceCorrectionModal';
+import StaffDeviceManagementModal from '../../src/components/admin/StaffDeviceManagementModal';
+import CampusGeofenceModal from '../../src/components/admin/CampusGeofenceModal';
+import StaffAttendanceExceptionsModal from '../../src/components/admin/StaffAttendanceExceptionsModal';
 
 // ─── Claymorphism shadow helpers ──────────────────────────────────────────────
 function clay(isDark: boolean, raised: 'sm' | 'md' | 'lg' = 'md') {
@@ -131,6 +140,18 @@ const STATUS_CYCLE: Record<string, string> = {
   half_day: 'absent',
 };
 
+function sameId(a: unknown, b: unknown) {
+  if (a == null || b == null) return false;
+  return String(a).toLowerCase() === String(b).toLowerCase();
+}
+
+function isOwnStaffRecord(staff: { staff_id?: string; person_id?: string } | null | undefined, user: ValidatedUser | null) {
+  if (!staff || !user) return false;
+  const staffId = user.staffId || user.staff_id;
+  const personId = user.personId || user.person_id;
+  return sameId(staff.staff_id, staffId) || sameId(staff.person_id, personId);
+}
+
 // ─── Compact status segment (explicit tap targets) ────────────────────────────
 function StatusSegment({
   status, isDark, onSelect, stretch,
@@ -159,7 +180,6 @@ function StatusSegment({
             activeOpacity={0.75}
             onPress={(e) => {
               // Keep segment taps from also cycling the whole card (esp. on web).
-              // @ts-expect-error RN web event
               e?.stopPropagation?.();
               onSelect(key);
             }}
@@ -226,11 +246,11 @@ function MiniStat({
 
 // ─── Staff Card ───────────────────────────────────────────────────────────────
 function StaffCard({
-  staff, index, isDark, cardBg, cardBorder, onSelectStatus, compact,
+  staff, index, isDark, cardBg, cardBorder, onSelectStatus, compact, onOpenCorrection, isSelf,
 }: {
   staff: any; index: number; isDark: boolean;
   cardBg: string; cardBorder: string; onSelectStatus: (status: string) => void;
-  compact: boolean;
+  compact: boolean; onOpenCorrection?: (staff: any) => void; isSelf?: boolean;
 }) {
   const status = staff.status || 'absent';
   const meta = STATUS_META[status] ?? STATUS_META.absent;
@@ -248,22 +268,26 @@ function StaffCard({
     onSelectStatus(STATUS_CYCLE[status] ?? 'present');
   };
 
+  const shellProps = {
+    activeOpacity: 0.82,
+    onPress: cycleStatus,
+    accessibilityRole: 'button' as const,
+    accessibilityLabel: `${staff.staff_name || 'Staff'}${isSelf ? ' (you)' : ''}, ${meta.label}. Tap to mark ${nextLabel}`,
+  };
+
   return (
     <Animated.View
       entering={FadeIn.delay(Math.min(index, 8) * 28).duration(220)}
     >
       <TouchableOpacity
-        activeOpacity={0.82}
-        onPress={cycleStatus}
-        accessibilityRole="button"
-        accessibilityLabel={`${staff.staff_name || 'Staff'}, ${meta.label}. Tap to mark ${nextLabel}`}
+        {...shellProps}
         style={[
           styles.card,
           {
             backgroundColor: cardBg,
             borderColor: cardBorder,
             borderLeftWidth: 3,
-            borderLeftColor: meta.dot,
+            borderLeftColor: isSelf ? '#7C6FFF' : meta.dot,
           },
           clay(isDark, 'sm'),
         ]}
@@ -284,27 +308,59 @@ function StaffCard({
             </LinearGradient>
 
             <View style={styles.cardInfo}>
-              <Text
-                style={[styles.staffName, { color: isDark ? '#FFFFFF' : '#111827' }]}
-                numberOfLines={1}
-              >
-                {staff.staff_name || 'Unknown'}
-              </Text>
+              <View style={styles.nameRow}>
+                <Text
+                  style={[styles.staffName, { color: isDark ? '#FFFFFF' : '#111827', flexShrink: 1, marginBottom: 0 }]}
+                  numberOfLines={1}
+                >
+                  {staff.staff_name || 'Unknown'}
+                </Text>
+                {isSelf ? (
+                  <View style={[styles.youBadge, { backgroundColor: isDark ? 'rgba(124,111,255,0.18)' : 'rgba(124,111,255,0.12)' }]}>
+                    <Text style={styles.youBadgeText}>You</Text>
+                  </View>
+                ) : null}
+              </View>
               <Text
                 style={[styles.staffRole, { color: isDark ? 'rgba(255,255,255,0.42)' : 'rgba(0,0,0,0.44)' }]}
                 numberOfLines={1}
               >
                 {staff.designation || 'Staff'}
+                {staff.verification_source ? (' • ' + (staff.verification_source === 'mobile_v2' ? 'Mobile V2' : staff.verification_source)) : ''}
               </Text>
+              {!!(staff.check_in_time || staff.check_out_time) && (
+                <Text style={{ fontSize: 10, color: '#10B981', fontWeight: '600', marginTop: 2 }}>
+                  {staff.check_in_time ? ('IN: ' + staff.check_in_time.slice(11, 16)) : ''} {staff.check_out_time ? ('OUT: ' + staff.check_out_time.slice(11, 16)) : ''}
+                </Text>
+              )}
             </View>
           </View>
 
-          <StatusSegment
-            status={status}
-            isDark={isDark}
-            onSelect={onSelectStatus}
-            stretch={compact}
-          />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <StatusSegment
+              status={status}
+              isDark={isDark}
+              onSelect={onSelectStatus}
+              stretch={compact}
+            />
+            {onOpenCorrection && (
+              <TouchableOpacity
+                onPress={(e) => {
+                  e?.stopPropagation?.();
+                  onOpenCorrection(staff);
+                }}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                style={{
+                  padding: 6,
+                  borderRadius: 8,
+                  backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)',
+                }}
+                accessibilityLabel="Correct staff attendance"
+              >
+                <Ionicons name="create-outline" size={15} color={isDark ? '#C7D2FE' : '#6366F1'} />
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
       </TouchableOpacity>
     </Animated.View>
@@ -388,7 +444,9 @@ function FilterMenu({
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function AdminAttendanceScreen() {
+  const router = useRouter();
   const { isDark } = useTheme();
+  const { user } = useAuth();
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
   const headerHeight = insets.top + 60;
@@ -397,7 +455,8 @@ export default function AdminAttendanceScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [staffList, setStaffList] = useState<any[]>([]);
-  const [isBulkUpdating, setIsBulkUpdating] = useState(false);
+  const originalStaffRef = React.useRef<any[]>([]);
+  const bulkSaveRequestKeyRef = React.useRef<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -406,6 +465,10 @@ export default function AdminAttendanceScreen() {
   const [deptFilter, setDeptFilter] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [openMenu, setOpenMenu] = useState<'dept' | 'status' | null>(null);
+  const [correctionStaff, setCorrectionStaff] = useState<any | null>(null);
+  const [deviceModalVisible, setDeviceModalVisible] = useState(false);
+  const [geofenceModalVisible, setGeofenceModalVisible] = useState(false);
+  const [exceptionsModalVisible, setExceptionsModalVisible] = useState(false);
 
   const scrollY = useSharedValue(0);
   const onScroll = useAnimatedScrollHandler({
@@ -423,70 +486,76 @@ export default function AdminAttendanceScreen() {
   const filterBg = isDark ? 'rgba(255,255,255,0.06)' : '#FFFFFF';
   const filterBorder = isDark ? 'rgba(255,255,255,0.09)' : 'rgba(0,0,0,0.09)';
   const filterText = isDark ? 'rgba(255,255,255,0.70)' : 'rgba(0,0,0,0.65)';
-  const footerBg = isDark ? 'rgba(14,15,26,0.97)' : 'rgba(242,243,248,0.97)';
-  const footerBorder = isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.08)';
   const searchBg = isDark ? 'rgba(255,255,255,0.06)' : '#FFFFFF';
   const orb1Color = isDark ? 'rgba(124,111,255,0.08)' : 'rgba(124,111,255,0.05)';
   const orb2Color = isDark ? 'rgba(0,196,140,0.06)' : 'rgba(0,196,140,0.05)';
 
-  const fetchAttendance = async () => {
+  const fetchAttendance = React.useCallback(async () => {
     try {
       setLoading(true);
       const data = await api.get<any[]>('/attendance/staff', { date: selectedDate });
-      setStaffList(data || []);
+      const list = data || [];
+      setStaffList(list);
+      originalStaffRef.current = list.map((s) => ({ ...s }));
     } catch { }
     finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [selectedDate]);
 
-  useEffect(() => { fetchAttendance(); }, [selectedDate]);
+  useEffect(() => { void fetchAttendance(); }, [fetchAttendance]);
 
   const onRefresh = () => { setRefreshing(true); fetchAttendance(); };
 
   const setStaffStatus = (staffId: string, status: string) => {
+    bulkSaveRequestKeyRef.current = null;
     setStaffList((prev) =>
       prev.map((s) => (s.staff_id === staffId ? { ...s, status } : s))
     );
   };
 
-  const handleMarkAll = (status: string) => {
-    const count = filteredStaff.length;
-    const scope = (deptFilter || statusFilter || searchQuery.trim())
-      ? `the ${count} filtered staff`
-      : 'all staff';
-    alertCompat(
-      'Confirm Bulk Update',
-      `Mark ${scope} as ${STATUS_META[status]?.label}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Confirm',
-          style: 'default',
-          onPress: () => {
-            setIsBulkUpdating(true);
-            setTimeout(() => {
-              const ids = new Set(filteredStaff.map((s) => s.staff_id));
-              setStaffList((prev) =>
-                prev.map((s) => (ids.has(s.staff_id) ? { ...s, status } : s))
-              );
-              setIsBulkUpdating(false);
-            }, 50);
-          },
-        },
-      ]
+  const handleMarkAll = () => {
+    bulkSaveRequestKeyRef.current = null;
+    const ids = new Set(filteredStaff.map((s) => s.staff_id));
+    if (ids.size === 0) return;
+    setStaffList((prev) =>
+      prev.map((s) => (ids.has(s.staff_id) ? { ...s, status: 'present' } : s))
     );
+  };
+
+  const handleReset = () => {
+    bulkSaveRequestKeyRef.current = null;
+    setStaffList(originalStaffRef.current.map((s) => ({ ...s })));
   };
 
   const submitAttendance = async () => {
     try {
       setIsSaving(true);
-      const records = staffList.map((s) => ({ staff_id: s.staff_id, status: s.status || 'absent' }));
-      await api.post('/attendance/staff', { date: selectedDate, attendance: records });
+      const originals = new Map(originalStaffRef.current.map((s) => [s.staff_id, s.status || null]));
+      const records = staffList
+        .map((s) => ({ staff_id: s.staff_id, status: s.status || 'absent' }))
+        .filter((row) => originals.get(row.staff_id) !== row.status);
+      if (records.length === 0) {
+        alertCompat('No Changes', 'There are no staff attendance changes to save.');
+        return;
+      }
+      const idempotencyKey = bulkSaveRequestKeyRef.current || Crypto.randomUUID();
+      bulkSaveRequestKeyRef.current = idempotencyKey;
+      await api.post('/attendance/staff', {
+        date: selectedDate,
+        attendance: records,
+        reason: 'Attendance sheet saved from the administrator portal',
+        idempotency_key: idempotencyKey,
+      }, { silent: true });
+      originalStaffRef.current = staffList.map((s) => ({ ...s }));
+      bulkSaveRequestKeyRef.current = null;
       alertCompat('✓ Saved', 'Attendance marked successfully.');
-    } catch {
-      alertCompat('Error', 'Failed to save attendance.');
+    } catch (err) {
+      const message = err instanceof APIError && err.message
+        ? err.message
+        : 'Failed to save attendance.';
+      alertCompat('Error', message);
     } finally {
       setIsSaving(false);
     }
@@ -558,11 +627,19 @@ export default function AdminAttendanceScreen() {
   });
 
   return (
-    <View style={[styles.container, { backgroundColor: pageBg }]}>
+    <TourTarget id="screen.admin-attendance.workspace" native><View style={[styles.container, { backgroundColor: pageBg }]}>
       <View style={[styles.orb1, { backgroundColor: orb1Color }]} />
       <View style={[styles.orb2, { backgroundColor: orb2Color }]} />
 
-      <AdminHeader title="Staff Attendance" showNotification scrollY={scrollY} />
+      <TourTarget id="screen.admin-attendance.overview" style={{ zIndex: 100, elevation: 20 }}><AdminHeader
+        title="Staff Attendance"
+        showNotification
+        scrollY={scrollY}
+        rightAction={{
+          icon: 'warning-outline',
+          onPress: () => router.push('/admin/attendance-risk' as any),
+        }}
+      /></TourTarget>
 
       {loading && !refreshing ? (
         <View style={styles.loaderContainer}>
@@ -571,7 +648,7 @@ export default function AdminAttendanceScreen() {
         </View>
       ) : (
         <View style={[styles.body, { paddingTop: headerHeight + 10 }]}>
-          {/* ── Slim overview strip (fixed) ───────────────────────────────── */}
+          {/* ── Slim overview strip (stays pinned) ────────────────────────── */}
           <View style={[
             styles.summaryStrip,
             { backgroundColor: summaryBg, borderColor: summaryBorder },
@@ -628,87 +705,78 @@ export default function AdminAttendanceScreen() {
             </View>
           </View>
 
-          {/* ── Search + filters (fixed) ──────────────────────────────────── */}
-          <View style={[styles.searchWrap, { backgroundColor: searchBg, borderColor: filterBorder }, clay(isDark, 'sm')]}>
-            <Ionicons name="search" size={16} color={filterText} style={{ marginRight: 8 }} />
-            <TextInput
-              value={searchQuery}
-              onChangeText={setSearchQuery}
-              placeholder="Search staff…"
-              placeholderTextColor={isDark ? 'rgba(255,255,255,0.32)' : 'rgba(0,0,0,0.32)'}
-              style={[styles.searchInput, { color: titleColor }]}
-              returnKeyType="search"
-              clearButtonMode="while-editing"
-            />
-            {searchQuery.length > 0 && Platform.OS !== 'ios' ? (
-              <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={8}>
-                <Ionicons name="close-circle" size={16} color={filterText} />
-              </TouchableOpacity>
-            ) : null}
-          </View>
-
-          <View style={styles.filterRow}>
-            <FilterChip
-              label={deptFilter ?? 'All Depts'}
-              active={!!deptFilter}
-              isDark={isDark}
-              filterBg={filterBg}
-              filterBorder={filterBorder}
-              filterText={filterText}
-              icon="business-outline"
-              onPress={() => setOpenMenu('dept')}
-            />
-            <FilterChip
-              label={statusFilter ? (STATUS_META[statusFilter]?.label ?? 'Status') : 'Status'}
-              active={!!statusFilter}
-              isDark={isDark}
-              filterBg={filterBg}
-              filterBorder={filterBorder}
-              filterText={filterText}
-              icon="funnel-outline"
-              onPress={() => setOpenMenu('status')}
-            />
-            <AppDatePicker
-              value={selectedDate}
-              onChange={setSelectedDate}
-              maximumDate={todayYMD}
-              variant="compact"
-              isDark={isDark}
-              accentColor="#7C6FFF"
-              containerStyle={styles.datePickerContainer}
-            />
-          </View>
-
-          {hasActiveFilters && (
-            <TouchableOpacity onPress={clearFilters} style={styles.clearFiltersRow} activeOpacity={0.7}>
-              <Ionicons name="close-circle-outline" size={14} color="#7C6FFF" />
-              <Text style={styles.clearFiltersText}>Clear filters</Text>
+          {/* ── V2 Administration Actions Bar ─────────────────────── */}
+          <View style={{ flexDirection: 'row', gap: 8, marginHorizontal: 16, marginTop: 10, marginBottom: 4 }}>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={() => setDeviceModalVisible(true)}
+              style={{
+                flex: 1,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                paddingVertical: 9,
+                borderRadius: 12,
+                backgroundColor: isDark ? 'rgba(99, 102, 241, 0.15)' : '#EEF2FF',
+                borderWidth: 1,
+                borderColor: 'rgba(99, 102, 241, 0.25)',
+                gap: 5,
+              }}
+            >
+              <Ionicons name="phone-portrait-outline" size={14} color="#6366F1" />
+              <Text style={{ fontSize: 12, fontWeight: '700', color: '#6366F1' }}>Devices</Text>
             </TouchableOpacity>
-          )}
 
-          <View style={styles.listHeader}>
-            <View style={styles.sectionAccentRow}>
-              <LinearGradient
-                colors={['#7C6FFF', '#5A4FE0']}
-                style={styles.sectionAccent}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-              />
-              <Text style={[styles.sectionTitle, { color: sectionColor }]}>STAFF LIST</Text>
-            </View>
-            <View style={[styles.countBadge, { backgroundColor: isDark ? 'rgba(124,111,255,0.18)' : 'rgba(124,111,255,0.12)' }, clayGlow('#7C6FFF', 'sm')]}>
-              <Text style={styles.countBadgeText}>
-                {hasActiveFilters ? `${filteredStaff.length} of ${staffList.length}` : filteredStaff.length}
-              </Text>
-            </View>
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={() => setGeofenceModalVisible(true)}
+              style={{
+                flex: 1,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                paddingVertical: 9,
+                borderRadius: 12,
+                backgroundColor: isDark ? 'rgba(16, 185, 129, 0.15)' : '#D1FAE5',
+                borderWidth: 1,
+                borderColor: 'rgba(16, 185, 129, 0.25)',
+                gap: 5,
+              }}
+            >
+              <Ionicons name="navigate-outline" size={14} color="#10B981" />
+              <Text style={{ fontSize: 12, fontWeight: '700', color: '#10B981' }}>Geofence</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              activeOpacity={0.8}
+              onPress={() => setExceptionsModalVisible(true)}
+              style={{
+                flex: 1,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                paddingVertical: 9,
+                borderRadius: 12,
+                backgroundColor: isDark ? 'rgba(245, 158, 11, 0.15)' : '#FEF3C7',
+                borderWidth: 1,
+                borderColor: 'rgba(245, 158, 11, 0.25)',
+                gap: 5,
+              }}
+            >
+              <Ionicons name="shield-outline" size={14} color="#F59E0B" />
+              <Text style={{ fontSize: 12, fontWeight: '700', color: '#F59E0B' }}>Exceptions</Text>
+            </TouchableOpacity>
           </View>
 
-          {/* ── Scrollable staff list ─────────────────────────────────────── */}
+          {/* ── Scrollable: search, filters, staff, actions ──────────────── */}
           <Animated.FlatList
             data={filteredStaff}
             keyExtractor={(item) => String(item.staff_id)}
             style={styles.list}
-            contentContainerStyle={styles.listContent}
+            contentContainerStyle={[
+              styles.listContent,
+              { paddingBottom: Math.max(insets.bottom, 16) },
+            ]}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
             onScroll={onScroll}
@@ -723,11 +791,87 @@ export default function AdminAttendanceScreen() {
               />
             }
             ListHeaderComponent={
-              refreshing ? (
-                <View style={{ alignItems: 'center', paddingBottom: 12 }}>
-                  <LogoLoader size={28} color="#7C6FFF" />
+              <View>
+                {refreshing ? (
+                  <View style={{ alignItems: 'center', paddingBottom: 12 }}>
+                    <LogoLoader size={28} color="#7C6FFF" />
+                  </View>
+                ) : null}
+
+                <View style={[styles.searchWrap, { backgroundColor: searchBg, borderColor: filterBorder }, clay(isDark, 'sm')]}>
+                  <Ionicons name="search" size={16} color={filterText} style={{ marginRight: 8 }} />
+                  <TextInput
+                    value={searchQuery}
+                    onChangeText={setSearchQuery}
+                    placeholder="Search staff…"
+                    placeholderTextColor={isDark ? 'rgba(255,255,255,0.32)' : 'rgba(0,0,0,0.32)'}
+                    style={[styles.searchInput, { color: titleColor }]}
+                    returnKeyType="search"
+                    clearButtonMode="while-editing"
+                  />
+                  {searchQuery.length > 0 && Platform.OS !== 'ios' ? (
+                    <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={8}>
+                      <Ionicons name="close-circle" size={16} color={filterText} />
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
-              ) : null
+
+                <View style={styles.filterRow}>
+                  <FilterChip
+                    label={deptFilter ?? 'All Depts'}
+                    active={!!deptFilter}
+                    isDark={isDark}
+                    filterBg={filterBg}
+                    filterBorder={filterBorder}
+                    filterText={filterText}
+                    icon="business-outline"
+                    onPress={() => setOpenMenu('dept')}
+                  />
+                  <FilterChip
+                    label={statusFilter ? (STATUS_META[statusFilter]?.label ?? 'Status') : 'Status'}
+                    active={!!statusFilter}
+                    isDark={isDark}
+                    filterBg={filterBg}
+                    filterBorder={filterBorder}
+                    filterText={filterText}
+                    icon="funnel-outline"
+                    onPress={() => setOpenMenu('status')}
+                  />
+                  <AppDatePicker
+                    value={selectedDate}
+                    onChange={setSelectedDate}
+                    maximumDate={todayYMD}
+                    variant="compact"
+                    isDark={isDark}
+                    accentColor="#7C6FFF"
+                    containerStyle={styles.datePickerContainer}
+                  />
+                </View>
+
+                {hasActiveFilters && (
+                  <TouchableOpacity onPress={clearFilters} style={styles.clearFiltersRow} activeOpacity={0.7}>
+                    <Ionicons name="close-circle-outline" size={14} color="#7C6FFF" />
+                    <Text style={styles.clearFiltersText}>Clear filters</Text>
+                  </TouchableOpacity>
+                )}
+
+                <View style={styles.listHeader}>
+                  <View style={styles.sectionAccentRow}>
+                    <LinearGradient
+                      colors={['#7C6FFF', '#5A4FE0']}
+                      style={styles.sectionAccent}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                    />
+                    <Text style={[styles.sectionTitle, { color: sectionColor }]}>STAFF LIST</Text>
+                  </View>
+                  <View style={[styles.countBadge, { backgroundColor: isDark ? 'rgba(124,111,255,0.18)' : 'rgba(124,111,255,0.12)' }, clayGlow('#7C6FFF', 'sm')]}>
+                    <Text style={styles.countBadgeText}>
+                      {hasActiveFilters ? `${filteredStaff.length} of ${staffList.length}` : filteredStaff.length}
+                    </Text>
+                  </View>
+                </View>
+              </View>
             }
             ListEmptyComponent={
               <Animated.View entering={FadeIn.duration(240)} style={styles.emptyBox}>
@@ -760,9 +904,96 @@ export default function AdminAttendanceScreen() {
                 cardBg={cardBg}
                 cardBorder={cardBorder}
                 compact={isCompact}
+                isSelf={isOwnStaffRecord(item, user)}
                 onSelectStatus={(status) => setStaffStatus(item.staff_id, status)}
+                onOpenCorrection={(s) => setCorrectionStaff(s)}
               />
             )}
+            ListFooterComponent={
+              staffList.length === 0 ? null : (
+                <View
+                  style={[
+                    styles.footerContainer,
+                    {
+                      backgroundColor: cardBg,
+                      borderColor: cardBorder,
+                    },
+                    clay(isDark, 'lg'),
+                  ]}
+                >
+                  <View style={styles.quickActions}>
+                    <TouchableOpacity
+                      onPress={handleMarkAll}
+                      disabled={filteredStaff.length === 0}
+                      accessibilityRole="button"
+                      accessibilityLabel="Mark all visible staff present"
+                      style={[
+                        styles.quickBtn,
+                        { backgroundColor: isDark ? STATUS_META.present.darkBg : STATUS_META.present.lightBg },
+                        filteredStaff.length === 0 && { opacity: 0.45 },
+                      ]}
+                    >
+                      <Ionicons name="checkmark-done" size={15} color={isDark ? STATUS_META.present.darkText : STATUS_META.present.lightText} />
+                      <Text style={[styles.quickBtnText, { color: isDark ? STATUS_META.present.darkText : STATUS_META.present.lightText }]}>
+                        Mark All
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={handleReset}
+                      disabled={staffList.length === 0}
+                      accessibilityRole="button"
+                      accessibilityLabel="Reset attendance to last loaded values"
+                      style={[
+                        styles.quickBtn,
+                        { backgroundColor: isDark ? 'rgba(124,111,255,0.16)' : 'rgba(124,111,255,0.10)' },
+                        staffList.length === 0 && { opacity: 0.45 },
+                      ]}
+                    >
+                      <Ionicons name="refresh" size={15} color={isDark ? '#C7D2FE' : '#5A4FE0'} />
+                      <Text style={[styles.quickBtnText, { color: isDark ? '#C7D2FE' : '#5A4FE0' }]}>
+                        Reset
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={styles.footerRow}>
+                    <View style={styles.footerMeta}>
+                      <Text style={[styles.footerCount, { color: titleColor }]}>
+                        {stats.present}
+                        <Text style={[styles.footerTotal, { color: subColor }]}> / {stats.total}</Text>
+                      </Text>
+                      <Text style={[styles.footerPct, { color: subColor }]}>{presentPct}% present</Text>
+                    </View>
+                    <TouchableOpacity
+                      onPress={submitAttendance}
+                      disabled={isSaving || staffList.length === 0}
+                      activeOpacity={0.85}
+                      style={[
+                        styles.submitBtn,
+                        clayGlow('#7C6FFF', 'md'),
+                        (isSaving || staffList.length === 0) && { opacity: 0.55 },
+                      ]}
+                    >
+                      <LinearGradient
+                        colors={['#7C6FFF', '#5A4FE0']}
+                        style={styles.submitGrad}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 0 }}
+                      >
+                        {isSaving ? (
+                          <LogoLoader size={20} color="#fff" />
+                        ) : (
+                          <>
+                            <Ionicons name="checkmark-done" size={18} color="#fff" style={{ marginRight: 8 }} />
+                            <Text style={styles.submitText}>Save Attendance</Text>
+                          </>
+                        )}
+                      </LinearGradient>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )
+            }
           />
         </View>
       )}
@@ -786,88 +1017,34 @@ export default function AdminAttendanceScreen() {
         onClose={() => setOpenMenu(null)}
       />
 
-      {/* ── Footer CTA ──────────────────────────────────────────────────────── */}
-      <View
-        style={[
-          styles.footerContainer,
-          {
-            backgroundColor: footerBg,
-            borderTopColor: footerBorder,
-            paddingBottom: Math.max(insets.bottom, 12),
-          },
-          clay(isDark, 'lg'),
-        ]}
-      >
-        <View style={styles.quickActions}>
-          <TouchableOpacity
-            onPress={() => handleMarkAll('present')}
-            accessibilityLabel="Mark all present"
-            style={[styles.quickBtn, { backgroundColor: isDark ? STATUS_META.present.darkBg : STATUS_META.present.lightBg }]}
-          >
-            <Ionicons name="checkmark-circle" size={15} color={isDark ? STATUS_META.present.darkText : STATUS_META.present.lightText} />
-            <Text style={[styles.quickBtnText, { color: isDark ? STATUS_META.present.darkText : STATUS_META.present.lightText }]}>
-              All Present
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => handleMarkAll('absent')}
-            accessibilityLabel="Mark all absent"
-            style={[styles.quickBtn, { backgroundColor: isDark ? STATUS_META.absent.darkBg : STATUS_META.absent.lightBg }]}
-          >
-            <Ionicons name="close-circle" size={15} color={isDark ? STATUS_META.absent.darkText : STATUS_META.absent.lightText} />
-            <Text style={[styles.quickBtnText, { color: isDark ? STATUS_META.absent.darkText : STATUS_META.absent.lightText }]}>
-              All Absent
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => handleMarkAll('half_day')}
-            accessibilityLabel="Mark all half-day"
-            style={[styles.quickBtn, { backgroundColor: isDark ? STATUS_META.half_day.darkBg : STATUS_META.half_day.lightBg }]}
-          >
-            <Ionicons name="time" size={15} color={isDark ? STATUS_META.half_day.darkText : STATUS_META.half_day.lightText} />
-            <Text style={[styles.quickBtnText, { color: isDark ? STATUS_META.half_day.darkText : STATUS_META.half_day.lightText }]}>
-              All Half
-            </Text>
-          </TouchableOpacity>
-        </View>
+      <StaffAttendanceCorrectionModal
+        visible={!!correctionStaff}
+        staff={correctionStaff}
+        date={selectedDate}
+        isDark={isDark}
+        onClose={() => setCorrectionStaff(null)}
+        onSuccess={() => fetchAttendance()}
+      />
 
-        <View style={styles.footerRow}>
-          <View style={styles.footerMeta}>
-            <Text style={[styles.footerCount, { color: titleColor }]}>
-              {stats.present}
-              <Text style={[styles.footerTotal, { color: subColor }]}> / {stats.total}</Text>
-            </Text>
-            <Text style={[styles.footerPct, { color: subColor }]}>{presentPct}% present</Text>
-          </View>
-          <TouchableOpacity
-            onPress={submitAttendance}
-            disabled={isBulkUpdating || isSaving || staffList.length === 0}
-            activeOpacity={0.85}
-            style={[
-              styles.submitBtn,
-              clayGlow('#7C6FFF', 'md'),
-              (isBulkUpdating || isSaving || staffList.length === 0) && { opacity: 0.55 },
-            ]}
-          >
-            <LinearGradient
-              colors={['#7C6FFF', '#5A4FE0']}
-              style={styles.submitGrad}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-            >
-              {isSaving || isBulkUpdating ? (
-                <LogoLoader size={20} color="#fff" />
-              ) : (
-                <>
-                  <Ionicons name="checkmark-done" size={18} color="#fff" style={{ marginRight: 8 }} />
-                  <Text style={styles.submitText}>Save Attendance</Text>
-                </>
-              )}
-            </LinearGradient>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </View>
+      <StaffDeviceManagementModal
+        visible={deviceModalVisible}
+        isDark={isDark}
+        onClose={() => setDeviceModalVisible(false)}
+      />
+
+      <CampusGeofenceModal
+        visible={geofenceModalVisible}
+        isDark={isDark}
+        onClose={() => setGeofenceModalVisible(false)}
+      />
+
+      <StaffAttendanceExceptionsModal
+        visible={exceptionsModalVisible}
+        isDark={isDark}
+        onClose={() => setExceptionsModalVisible(false)}
+      />
+
+    </View></TourTarget>
   );
 }
 
@@ -988,7 +1165,7 @@ const styles = StyleSheet.create({
   countBadgeText: { fontSize: 12, fontWeight: '700', color: '#7C6FFF' },
 
   list: { flex: 1 },
-  listContent: { paddingBottom: 170, flexGrow: 1 },
+  listContent: { flexGrow: 1 },
 
   card: {
     borderRadius: 14, paddingVertical: 10, paddingHorizontal: 12, marginBottom: 8,
@@ -1007,6 +1184,9 @@ const styles = StyleSheet.create({
   cardInfo: { flex: 1, marginRight: 8, minWidth: 0 },
   staffName: { fontSize: 14, fontWeight: '700', letterSpacing: -0.2, marginBottom: 2 },
   staffRole: { fontSize: 11, fontWeight: '500' },
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 },
+  youBadge: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: 8 },
+  youBadgeText: { fontSize: 10, fontWeight: '800', color: '#7C6FFF', letterSpacing: 0.2 },
 
   segmentTrack: {
     flexDirection: 'row',
@@ -1056,9 +1236,11 @@ const styles = StyleSheet.create({
   emptyClearText: { fontSize: 13, fontWeight: '700', color: '#7C6FFF' },
 
   footerContainer: {
-    position: 'absolute', bottom: 0, left: 0, right: 0,
-    paddingHorizontal: 16, paddingTop: 12,
-    borderTopWidth: 1,
+    marginTop: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    borderRadius: 16,
+    borderWidth: 1,
     flexDirection: 'column',
     gap: 10,
   },
@@ -1076,7 +1258,7 @@ const styles = StyleSheet.create({
     gap: 5,
   },
   quickBtnText: {
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: '700',
   },
   footerRow: {

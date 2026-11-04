@@ -17,10 +17,11 @@ import { disableFingerprintForAccount } from './biometricService';
  * STORAGE STRATEGY
  *   All vault blobs are persisted through `SecureTokenStore`, which chunks
  *   values into the native OS keychain/Keystore (AsyncStorage on web). A
- *   recovery credential (email + password) is kept for every platform so a
- *   revoked/expired refresh token can silently re-authenticate. It is used
- *   only when normal refresh-token rotation can no longer recover the session
- *   — never as the primary switch path.
+ *   recovery credential matching the login method (email + password or the
+ *   school-issued QR bearer payload) is kept so a revoked/expired refresh
+ *   token can silently re-authenticate. It is used only when normal refresh-
+ *   token rotation can no longer recover the session — never as the primary
+ *   switch path.
  *
  *   Namespaced keys (clearly separated from the single-session keys
  *   `auth_session` / `supabase_session_enc` / `sb_secure_refresh_token`):
@@ -28,6 +29,7 @@ import { disableFingerprintForAccount } from './biometricService';
  *     - vault_active_user_id_v1    → the active-account pointer
  *     - vault_refresh_tokens_v1    → per-userId backup refresh-token MAP
  *     - vault_login_credentials_v1 → recovery credentials (all platforms)
+ *     - vault_qr_credentials_v1    → per-userId QR recovery credentials
  *     - vault_migration_v1_done    → one-time migration flag
  *
  * Every value is wrapped in a `{ __vault: <marker> }` envelope so malformed,
@@ -39,6 +41,7 @@ const VAULT_ACCOUNTS_KEY = 'vault_accounts_v1';
 const VAULT_ACTIVE_KEY = 'vault_active_user_id_v1';
 const VAULT_REFRESH_MAP_KEY = 'vault_refresh_tokens_v1';
 const VAULT_LOGIN_CREDENTIALS_KEY = 'vault_login_credentials_v1';
+const VAULT_QR_CREDENTIALS_KEY = 'vault_qr_credentials_v1';
 const VAULT_MIGRATION_FLAG_KEY = 'vault_migration_v1_done';
 
 /** The existing single-session key written by authService (source for migration). */
@@ -83,6 +86,14 @@ interface LoginCredentialsEnvelope {
   // written by older builds migrate without a schema break.
   __vault: 'login_credentials_v1';
   credentials: Record<string, LoginRecoveryCredential>;
+}
+export interface QrRecoveryCredential {
+  qrPayload: string;
+  updatedAt: number;
+}
+interface QrCredentialsEnvelope {
+  __vault: 'qr_credentials_v1';
+  credentials: Record<string, QrRecoveryCredential>;
 }
 interface InterimLoginCredentialsEnvelope {
   // Briefly used by a newer build. Read and migrate it so no update path loses
@@ -195,6 +206,32 @@ async function _writeLoginCredentials(
 ): Promise<void> {
   await writeEnvelope(VAULT_LOGIN_CREDENTIALS_KEY, {
     __vault: 'login_credentials_v1',
+    credentials,
+  });
+}
+async function _readQrCredentials(): Promise<Record<string, QrRecoveryCredential>> {
+  const env = await readEnvelope<QrCredentialsEnvelope>(
+    VAULT_QR_CREDENTIALS_KEY,
+    'qr_credentials_v1'
+  );
+  if (!env?.credentials || typeof env.credentials !== 'object') return {};
+  return Object.fromEntries(
+    Object.entries(env.credentials)
+      .filter(([, value]) => typeof value?.qrPayload === 'string' && value.qrPayload.trim())
+      .map(([userId, value]) => [
+        userId,
+        {
+          qrPayload: value.qrPayload.trim(),
+          updatedAt: Number.isFinite(value.updatedAt) ? value.updatedAt : Date.now(),
+        },
+      ])
+  );
+}
+async function _writeQrCredentials(
+  credentials: Record<string, QrRecoveryCredential>
+): Promise<void> {
+  await writeEnvelope(VAULT_QR_CREDENTIALS_KEY, {
+    __vault: 'qr_credentials_v1',
     credentials,
   });
 }
@@ -319,6 +356,7 @@ export async function setBackupRefreshTokenForUser(
 ): Promise<void> {
   await ensureMigrated();
   const tokens = await _readRefreshMap();
+  if (tokens[userId] === token) return;
   tokens[userId] = token;
   await _writeRefreshMap(tokens);
 }
@@ -384,6 +422,45 @@ export async function removeLoginRecoveryCredential(userId: string): Promise<voi
   await _writeLoginCredentials(credentials);
 }
 
+/**
+ * Save the school-issued QR bearer credential as a last-resort session recovery
+ * mechanism. Native builds keep it in the OS Keychain/Keystore through
+ * SecureTokenStore. The payload is never placed inside VaultAccount metadata,
+ * logs, or UI state after the scan completes.
+ */
+export async function saveQrRecoveryCredential(
+  userId: string,
+  qrPayload: string
+): Promise<void> {
+  if (!userId || !qrPayload?.trim()) return;
+  await ensureMigrated();
+  const credentials = await _readQrCredentials();
+  credentials[userId] = {
+    qrPayload: qrPayload.trim(),
+    updatedAt: Date.now(),
+  };
+  await _writeQrCredentials(credentials);
+}
+
+export async function getQrRecoveryCredential(
+  userId: string
+): Promise<QrRecoveryCredential | null> {
+  if (!userId) return null;
+  await ensureMigrated();
+  const credentials = await _readQrCredentials();
+  const credential = credentials[userId];
+  return credential?.qrPayload ? credential : null;
+}
+
+export async function removeQrRecoveryCredential(userId: string): Promise<void> {
+  if (!userId) return;
+  await ensureMigrated();
+  const credentials = await _readQrCredentials();
+  if (!(userId in credentials)) return;
+  delete credentials[userId];
+  await _writeQrCredentials(credentials);
+}
+
 // ── CRUD ─────────────────────────────────────────────────────────────────
 
 /**
@@ -395,18 +472,34 @@ export async function addAccount(account: VaultAccount): Promise<void> {
   await ensureMigrated();
   const accounts = await _readAccounts();
   const idx = accounts.findIndex((a) => a.userId === account.userId);
-  if (idx >= 0) {
-    accounts[idx] = account; // refresh stored session/profile
-  } else {
-    accounts.push(account);
+  // A switch validates the profile again, but usually leaves the saved tokens
+  // unchanged. Avoid rewriting every account's encrypted chunks in that case.
+  // Keep display labels populated separately by the account picker.
+  const next = idx >= 0 ? { ...accounts[idx], ...account } : account;
+  if (idx >= 0 && accounts[idx].validatedUser.classId !== account.validatedUser.classId && account.classLabel === undefined) {
+    delete next.classLabel;
   }
-  await _writeAccounts(accounts);
+  // Supabase recalculates expires_in on every setSession, even for the same
+  // JWT. The absolute expires_at controls token validity throughout the app.
+  const comparable = (entry: VaultAccount) => JSON.stringify({
+    ...entry,
+    supabaseSession: { ...entry.supabaseSession, expires_in: undefined },
+  });
+  const changed = idx < 0 || comparable(accounts[idx]) !== comparable(next);
+  if (idx >= 0) {
+    accounts[idx] = next;
+  } else {
+    accounts.push(next);
+  }
+  if (changed) await _writeAccounts(accounts);
 
   const refresh = account.supabaseSession?.refresh_token;
   if (refresh) {
     const tokens = await _readRefreshMap();
-    tokens[account.userId] = refresh;
-    await _writeRefreshMap(tokens);
+    if (tokens[account.userId] !== refresh) {
+      tokens[account.userId] = refresh;
+      await _writeRefreshMap(tokens);
+    }
   }
 }
 
@@ -431,6 +524,7 @@ export async function removeAccount(userId: string): Promise<void> {
 
   await removeBackupRefreshTokenForUser(userId);
   await removeLoginRecoveryCredential(userId);
+  await removeQrRecoveryCredential(userId);
   // This is the single choke point for account removal (manual logout and the
   // "remove saved login" UI both reach it), so it is where the account's
   // fingerprint opt-in record is dropped. Scoped to this userId — siblings

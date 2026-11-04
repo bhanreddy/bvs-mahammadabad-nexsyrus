@@ -1,3 +1,4 @@
+import { TourTarget, TourScrollView } from '@/src/features/app-tour';
 import React, { useRef, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, StatusBar, Switch, Linking } from 'react-native';
 import { alertCompat } from '../../src/utils/crossPlatformAlert';
@@ -39,7 +40,19 @@ export default function Settings() {
     const { t, i18n } = useTranslation();
     const styles = React.useMemo(() => getStyles(theme.colors), [theme]);
     const [switcherOpen, setSwitcherOpen] = useState(false);
+    const [birthdaySoundEnabled, setBirthdaySoundEnabled] = useState(true);
     const avatarUploaderRef = useRef<AvatarUploaderHandle>(null);
+
+    React.useEffect(() => {
+        AsyncStorage.getItem('birthday_celebration_sound_enabled').then((val) => {
+            if (val === 'false') setBirthdaySoundEnabled(false);
+        }).catch(() => {});
+    }, []);
+
+    const handleToggleBirthdaySound = async (val: boolean) => {
+        setBirthdaySoundEnabled(val);
+        await AsyncStorage.setItem('birthday_celebration_sound_enabled', val ? 'true' : 'false');
+    };
 
     const handleLogout = async () => {
         await AsyncStorage.removeItem('student_auto_login');
@@ -51,15 +64,15 @@ export default function Settings() {
 
     return (
         <View style={styles.container}>
-            <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={theme.colors.background} />
+            <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
 
-            <StudentHeader
+            <TourTarget id="screen.screen-settings.overview"><StudentHeader
                 title={t('settings.title', 'Settings')}
                 showBackButton={true}
                 showSettingsButton={false}
-            />
+            /></TourTarget>
 
-            <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+            <TourTarget id="screen.screen-settings.workspace" native><TourScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
                 {/* ── Profile card ── */}
                 <Animated.View entering={FadeInDown.delay(80).duration(600)} style={styles.profileCard}>
@@ -143,13 +156,28 @@ export default function Settings() {
                         iconColor="#3B82F6" iconBg="#EFF6FF"
                         label={t('settings.language_telugu', 'Language (Telugu)')}
                         sublabel={t('settings.language_hint', 'Switch the app between English and Telugu')}
-                        isLast
                         rightElement={
                             <Switch
                                 trackColor={{ false: theme.colors.border, true: theme.colors.primary }}
                                 thumbColor="#fff"
                                 onValueChange={(val) => { i18n.changeLanguage(val ? 'te' : 'en').catch(console.error); }}
                                 value={i18n.language === 'te'}
+                            />
+                        }
+                    />
+
+                    <SettingRow
+                        icon="musical-notes"
+                        iconColor="#EC4899" iconBg="#FDF2F8"
+                        label={t('settings.birthday_sound', 'Birthday celebration sounds')}
+                        sublabel={t('settings.birthday_sound_hint', 'Play a cheerful greeting sound on birthdays')}
+                        isLast
+                        rightElement={
+                            <Switch
+                                trackColor={{ false: theme.colors.border, true: '#F472B6' }}
+                                thumbColor="#fff"
+                                onValueChange={handleToggleBirthdaySound}
+                                value={birthdaySoundEnabled}
                             />
                         }
                     />
@@ -243,7 +271,7 @@ export default function Settings() {
                     <View style={styles.footerDot} />
                 </Animated.View>
 
-            </ScrollView>
+            </TourScrollView></TourTarget>
 
             <AccountSwitcherSheet visible={switcherOpen} onClose={() => setSwitcherOpen(false)} />
         </View>

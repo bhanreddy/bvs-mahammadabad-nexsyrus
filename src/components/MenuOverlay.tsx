@@ -1,16 +1,19 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Href, useRouter } from 'expo-router';
-import React, { useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
     Image,
+    Keyboard,
     Modal,
     Platform,
     Pressable,
     StatusBar,
+    ScrollView,
     StyleSheet,
     Text,
+    TextInput,
     useWindowDimensions,
     View,
 } from 'react-native';
@@ -18,7 +21,6 @@ import { BlurView } from 'expo-blur';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, {
     Extrapolation,
-    FadeInLeft,
     interpolate,
     runOnJS,
     useAnimatedStyle,
@@ -91,92 +93,56 @@ interface Props {
     onClose: () => void;
     userType?: 'student' | 'staff' | 'driver';
     photoUrl?: string | null;
+    menuItems?: MenuItem[];
+    onNavigate?: (link: string) => void;
 }
 
-interface MenuItem {
+export interface MenuItem {
+    group?: string;
     key: string;
     label: string;
     icon: keyof typeof Ionicons.glyphMap;
     link: string;
+    hint?: string;
     accent?: string;
     /** Feature-flag key gating this drawer item (student items only). */
     feature?: FeatureKey;
 }
 
 /* ─── Individual Menu Item with press animation ─── */
-const MenuItemCard: React.FC<{ item: MenuItem; index: number; isDark: boolean; onPress: () => void }> = ({ item, index, isDark, onPress }) => {
-    const scale = useSharedValue(1);
-
-    const animStyle = useAnimatedStyle(() => ({
-        transform: [{ scale: scale.value }],
-    }));
-
+const MenuItemCard: React.FC<{ item: MenuItem; isDark: boolean; onPress: () => void }> = ({ item, isDark, onPress }) => {
     const accentColor = item.accent || '#4F46E5';
-    const { background: cardBg, border: cardBorder } = getPastelStyles(accentColor, isDark);
-    
-    const textClr = isDark ? '#E2E8F0' : '#2A3142';
-    const shadowOpacity = isDark ? 0 : 0.04;
+    const textClr = isDark ? '#E2E8F0' : '#1E293B';
+    const hintClr = isDark ? '#94A3B8' : '#64748B';
 
     return (
-        <Animated.View entering={FadeInLeft.delay(80 + index * 50).springify().damping(16).stiffness(150)}>
-            <Pressable
-                onPressIn={() => { scale.value = withSpring(0.96, { damping: 15, stiffness: 350 }); }}
-                onPressOut={() => { scale.value = withSpring(1, { damping: 12, stiffness: 220 }); }}
-                onPress={onPress}
-                style={Platform.OS === 'web' && { cursor: 'pointer' }}
-            >
-                <Animated.View style={[
-                    styles.menuCard,
-                    {
-                        backgroundColor: cardBg,
-                        borderColor: cardBorder,
-                        shadowOpacity: shadowOpacity,
-                        borderBottomWidth: isDark ? 1.2 : 2.5, // Puffy clay depth edge
-                    },
-                    animStyle
-                ]}>
-                    {/* Clay inner highlight top-left gradient */}
-                    <LinearGradient
-                        colors={isDark 
-                            ? ['rgba(255,255,255,0.06)', 'rgba(255,255,255,0)'] 
-                            : ['rgba(255,255,255,0.65)', 'rgba(255,255,255,0)']}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 0.5, y: 0.8 }}
-                        style={StyleSheet.absoluteFill}
-                        pointerEvents="none"
-                    />
-
-                    {/* Icon Box with soft tint background */}
-                    <View style={[
-                        styles.menuIconBox, 
-                        { 
-                            backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : '#FFFFFF',
-                            borderColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(15,23,42,0.04)',
-                            borderWidth: 1,
-                        }
-                    ]}>
-                        <Ionicons name={item.icon} size={18} color={accentColor} />
-                    </View>
-                    <Text style={[styles.menuLabel, { color: textClr }]}>{item.label}</Text>
-                    <View style={[
-                        styles.chevronBox, 
-                        { 
-                            backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : '#FFFFFF',
-                            borderColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(15,23,42,0.04)',
-                            borderWidth: 1,
-                        }
-                    ]}>
-                        <Ionicons name="chevron-forward" size={13} color={isDark ? '#475569' : '#94A3B8'} />
-                    </View>
-                </Animated.View>
-            </Pressable>
-        </Animated.View>
+        <Pressable
+            onPress={onPress}
+            accessibilityRole="button"
+            accessibilityLabel={item.hint ? `${item.label}. ${item.hint}` : item.label}
+            style={({ pressed }) => [
+                styles.menuCard,
+                pressed && { backgroundColor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(79,70,229,0.05)' },
+                Platform.OS === 'web' && { cursor: 'pointer' },
+            ]}
+        >
+            <View style={[styles.menuIconBox, { backgroundColor: schoolColorWithAlpha(accentColor, isDark ? 0.2 : 0.1) }]}>
+                <Ionicons name={item.icon} size={17} color={accentColor} />
+            </View>
+            <View style={styles.menuCopy}>
+                <Text style={[styles.menuLabel, { color: textClr }]} numberOfLines={1}>{item.label}</Text>
+                {!!item.hint && <Text style={[styles.menuHint, { color: hintClr }]} numberOfLines={1}>{item.hint}</Text>}
+            </View>
+            <Ionicons name="chevron-forward" size={15} color={isDark ? '#64748B' : '#CBD5E1'} />
+        </Pressable>
     );
 };
 
 /* ─── Main Component ─── */
-const MenuOverlay: React.FC<Props> = ({ visible, onClose, userType = 'student', photoUrl }) => {
+const MenuOverlay: React.FC<Props> = ({ visible, onClose, userType = 'student', photoUrl, menuItems, onNavigate }) => {
     const { t } = useTranslation();
+    const [query, setQuery] = useState('');
+    useEffect(() => { if (!visible) setQuery(''); }, [visible]);
     const router = useRouter();
     const { user, signOut } = useAuth();
     const { theme, isDark } = useTheme();
@@ -190,30 +156,51 @@ const MenuOverlay: React.FC<Props> = ({ visible, onClose, userType = 'student', 
 
     /* ── Menu items ── */
     const studentMenuItems: MenuItem[] = [
+        { key: 'daily', label: t('school_daily.title', 'SchoolIMS Daily'), icon: 'sunny-outline', link: '/Screen/schoolDaily', accent: '#2C68B0' },
+        { key: 'calendar', label: 'School Calendar', icon: 'calendar-outline', link: '/Screen/calendar', accent: '#4F46E5' },
+        { key: 'progress', label: 'My Progress', icon: 'sparkles-outline', link: '/Screen/studentProgress', accent: '#6366F1' },
         { key: 'dcgd', label: 'DCGD', icon: 'ribbon-outline', link: '/Screen/dcgd', accent: '#0D9488', feature: 'menu.dcgd' },
         { key: 'ai_doubt', label: 'AI Doubt Assist', icon: 'chatbubble-ellipses-outline', link: '/Screen/aiChat', accent: '#6366F1', feature: 'menu.ai_doubt_assist' },
         { key: 'insurance', label: 'Insurance', icon: 'shield-checkmark-outline', link: '/Screen/insurance', accent: '#10B981', feature: 'menu.insurance' },
+        { key: 'hostel', label: 'Hostel', icon: 'bed-outline', link: '/Screen/hostel', accent: '#6366F1', feature: 'quick.hostel' },
         { key: 'money_science', label: 'Money Science', icon: 'cash-outline', link: '/Screen/moneyScience', accent: '#8B5CF6', feature: 'menu.money_science' },
     ];
 
     const staffMenuItems: MenuItem[] = [
+        { key: 'daily', label: t('school_daily.title', 'SchoolIMS Daily'), icon: 'sunny-outline', link: '/Screen/schoolDaily', accent: '#2C68B0' },
+        { key: 'calendar', label: 'Academic Calendar', icon: 'calendar-outline', link: '/staff/calendar', accent: '#4F46E5' },
         { key: 'attendance', label: 'Mark Attendance', icon: 'checkbox-outline', link: '/staff/manage-students', accent: '#4F46E5' },
         { key: 'timetable', label: 'My Timetable', icon: 'calendar-outline', link: '/staff/timetable', accent: '#0EA5E9' },
         { key: 'student_portfolio', label: 'Student Portfolio', icon: 'id-card-outline', link: '/staff/student-portfolio', accent: '#14B8A6' },
+        { key: 'anecdotes', label: 'Observations & Anecdotes', icon: 'eye-outline', link: '/staff/anecdotes', accent: '#6366F1' },
+        { key: 'student_intelligence', label: 'Student Intelligence', icon: 'sparkles-outline', link: '/staff/student-intelligence', accent: '#8B5CF6' },
         { key: 'upload_marks', label: 'Upload Marks', icon: 'cloud-upload-outline', link: '/staff/results', accent: '#8B5CF6' },
         { key: 'leaves', label: 'Apply Leave', icon: 'document-text-outline', link: '/staff/leaves', accent: '#F59E0B' },
         { key: 'profile', label: 'Staff Profile', icon: 'person-outline', link: '/staff/profile', accent: '#10B981' },
     ];
 
     const driverMenuItems: MenuItem[] = [
+        { key: 'calendar', label: 'School Calendar', icon: 'calendar-outline', link: '/driver/calendar', accent: '#4F46E5' },
         { key: 'route', label: t('driver_ui.route'), icon: 'navigate-outline', link: '/driver/dashboard', accent: '#EC4899' },
         { key: 'students', label: t('driver_ui.students'), icon: 'people-outline', link: '/driver/students', accent: '#6366F1' },
         { key: 'profile', label: t('driver_ui.driver_profile'), icon: 'person-outline', link: '/driver/profile', accent: '#10B981' },
     ];
 
     const { isEnabled } = useFeatures();
-    const baseItems = userType === 'driver' ? driverMenuItems : userType === 'staff' ? staffMenuItems : studentMenuItems;
-    const itemsToRender = baseItems.filter((it) => !it.feature || isEnabled(it.feature));
+    const baseItems = menuItems ?? (userType === 'driver' ? driverMenuItems : userType === 'staff' ? staffMenuItems : studentMenuItems);
+    const normalizedQuery = query.trim().toLowerCase();
+    const itemsToRender = baseItems.filter((it) => (!it.feature || isEnabled(it.feature))
+        && (!normalizedQuery || `${it.label} ${it.hint || ''} ${it.group || ''}`.toLowerCase().includes(normalizedQuery)));
+    const sections = useMemo(() => {
+        const grouped: { title: string; items: MenuItem[] }[] = [];
+        for (const item of itemsToRender) {
+            const title = item.group || '';
+            const current = grouped[grouped.length - 1];
+            if (!current || current.title !== title) grouped.push({ title, items: [item] });
+            else current.items.push(item);
+        }
+        return grouped;
+    }, [itemsToRender]);
 
     /* ── Animations ── */
     useEffect(() => {
@@ -224,17 +211,18 @@ const MenuOverlay: React.FC<Props> = ({ visible, onClose, userType = 'student', 
             translateX.value = withTiming(-drawerWidth, { duration: 250 });
             backdropOpacity.value = withTiming(0, { duration: 200 });
         }
-    }, [visible, drawerWidth]);
+    }, [visible, drawerWidth, translateX, backdropOpacity]);
 
     const closeDrawer = useCallback(() => {
         translateX.value = withTiming(-drawerWidth, { duration: 250 });
         backdropOpacity.value = withTiming(0, { duration: 200 });
         setTimeout(onClose, 260);
-    }, [onClose, drawerWidth]);
+    }, [onClose, drawerWidth, translateX, backdropOpacity]);
 
     /* ── Swipe gesture ── */
     const panGesture = Gesture.Pan()
         .activeOffsetX(-20)
+        .failOffsetY([-12, 12])
         .onUpdate((e) => {
             if (e.translationX < 0) {
                 translateX.value = e.translationX;
@@ -267,7 +255,8 @@ const MenuOverlay: React.FC<Props> = ({ visible, onClose, userType = 'student', 
             closeDrawer();
             setTimeout(() => {
                 try {
-                    router.push(link as Href);
+                    if (onNavigate) onNavigate(link);
+                    else router.push(link as Href);
                     console.debug('[MenuOverlay] handlePress end', { link });
                 } catch (e) {
                     console.error('Button action failed:', e);
@@ -322,7 +311,7 @@ const MenuOverlay: React.FC<Props> = ({ visible, onClose, userType = 'student', 
         : [schoolColorWithAlpha(theme.colors.surface || '#FFFFFF', 0.85), schoolColorWithAlpha(theme.colors.background || '#F4F6F9', 0.92)];
 
     return (
-        <Modal visible={visible} transparent animationType="none" statusBarTranslucent>
+        <Modal visible={visible} transparent animationType="none" statusBarTranslucent onRequestClose={closeDrawer}>
             <GestureHandlerRootView style={StyleSheet.absoluteFill}>
                 <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
 
@@ -370,6 +359,13 @@ const MenuOverlay: React.FC<Props> = ({ visible, onClose, userType = 'student', 
                             {/* ── Profile Header ── */}
                             <View style={styles.profileSection}>
                                 <View style={styles.avatarRow}>
+                                    <Pressable
+                                        style={styles.profileTap}
+                                        disabled={userType !== 'staff'}
+                                        onPress={userType === 'staff' ? () => handlePress('/staff/profile') : undefined}
+                                        accessibilityRole={userType === 'staff' ? 'button' : undefined}
+                                        accessibilityLabel={userType === 'staff' ? 'Open my profile' : undefined}
+                                    >
                                     {/* Double ring avatar featuring school brand colors */}
                                     <LinearGradient
                                         colors={[accentColor, primaryLightColor]}
@@ -398,6 +394,7 @@ const MenuOverlay: React.FC<Props> = ({ visible, onClose, userType = 'student', 
                                             </Text>
                                         </View>
                                     </View>
+                                    </Pressable>
 
                                     {/* Clean Header Close Button */}
                                     <Pressable
@@ -420,70 +417,83 @@ const MenuOverlay: React.FC<Props> = ({ visible, onClose, userType = 'student', 
                                 <View style={[styles.headerDivider, { backgroundColor: theme.colors.border }]} />
                             </View>
 
-                            {/* ── Menu Items ── */}
-                            <View style={styles.menuList}>
-                                {itemsToRender.map((item, index) => (
-                                    <MenuItemCard
-                                        key={item.key}
-                                        item={item}
-                                        index={index}
-                                        isDark={isDark}
-                                        onPress={() => handlePress(item.link)}
+                            {userType === 'staff' && (
+                                <View style={[styles.searchBox, { borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)', backgroundColor: isDark ? 'rgba(255,255,255,0.05)' : '#FFFFFF' }]}>
+                                    <Ionicons name="search" size={16} color={theme.colors.textSecondary} />
+                                    <TextInput
+                                        value={query}
+                                        onChangeText={setQuery}
+                                        placeholder="Search by name or task"
+                                        accessibilityLabel="Search staff tools"
+                                        placeholderTextColor={theme.colors.textSecondary}
+                                        style={[styles.searchInput, { color: theme.colors.textStrong }]}
+                                        autoCapitalize="none"
+                                        autoCorrect={false}
+                                        returnKeyType="search"
+                                        onSubmitEditing={Keyboard.dismiss}
                                     />
+                                    {query.length > 0 && (
+                                        <Pressable onPress={() => setQuery('')} accessibilityRole="button" accessibilityLabel="Clear search" hitSlop={8}>
+                                            <Ionicons name="close-circle" size={18} color={theme.colors.textSecondary} />
+                                        </Pressable>
+                                    )}
+                                </View>
+                            )}
+                            {/* ── Menu Items ── */}
+                            <ScrollView
+                                style={{ flex: 1, minHeight: 0 }}
+                                contentContainerStyle={styles.menuList}
+                                showsVerticalScrollIndicator={false}
+                                keyboardShouldPersistTaps="handled"
+                                keyboardDismissMode="on-drag"
+                                nestedScrollEnabled
+                                onScrollBeginDrag={Keyboard.dismiss}
+                            >
+                                {sections.map((section, sectionIndex) => (
+                                    <View key={section.title || 'tools'}>
+                                        {!!section.title && (
+                                            <View style={[styles.groupHeader, sectionIndex === 0 && { marginTop: 4 }]}>
+                                                <Text accessibilityRole="header" style={[styles.groupLabel, { color: theme.colors.textSecondary }]}>{section.title}</Text>
+                                                <Text style={[styles.groupCount, { color: theme.colors.textSecondary }]}>{section.items.length}</Text>
+                                            </View>
+                                        )}
+                                        <View style={[styles.sectionCard, { backgroundColor: isDark ? 'rgba(255,255,255,0.04)' : '#FFFFFF', borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)' }]}>
+                                            {section.items.map((item, index) => (
+                                                <View key={item.key}>
+                                                    {index > 0 && <View style={[styles.rowDivider, { backgroundColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)' }]} />}
+                                                    <MenuItemCard item={item} isDark={isDark} onPress={() => handlePress(item.link)} />
+                                                </View>
+                                            ))}
+                                        </View>
+                                    </View>
                                 ))}
-                            </View>
-
-                            {/* ── Spacer ── */}
-                            <View style={{ flex: 1 }} />
+                                {itemsToRender.length === 0 && (
+                                    <View style={styles.emptySearch}>
+                                        <Text style={{ color: theme.colors.textSecondary, textAlign: 'center', lineHeight: 20 }}>No tools match “{query.trim()}”.</Text>
+                                        <Pressable onPress={() => setQuery('')} accessibilityRole="button" style={{ minHeight: 44, justifyContent: 'center' }}>
+                                            <Text style={{ color: theme.colors.primary, fontWeight: '700' }}>Clear search</Text>
+                                        </Pressable>
+                                    </View>
+                                )}
+                            </ScrollView>
 
                             {/* ── Logout Button ── */}
-                            <Animated.View entering={FadeInLeft.delay(80 + itemsToRender.length * 50).springify().damping(16).stiffness(150)}>
+                            <View style={[styles.logoutWrap, { borderTopColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.06)' }]}>
                                 <Pressable
                                     style={Platform.OS === 'web' && { cursor: 'pointer' }}
                                     onPress={handleLogout}
+                                    accessibilityRole="button"
+                                    accessibilityLabel={userType === 'driver' ? t('driver_ui.logout') : t('logout')}
                                 >
-                                    <View style={[
-                                        styles.logoutButton,
-                                        {
-                                            backgroundColor: logoutBg,
-                                            borderColor: logoutBorder,
-                                            borderBottomWidth: isDark ? 1.2 : 2.5, // Clay depth edge
-                                        }
-                                    ]}>
-                                        {/* Clay inner highlight top-left gradient */}
-                                        <LinearGradient
-                                            colors={isDark 
-                                                ? ['rgba(255,255,255,0.06)', 'rgba(255,255,255,0)'] 
-                                                : ['rgba(255,255,255,0.65)', 'rgba(255,255,255,0)']}
-                                            start={{ x: 0, y: 0 }}
-                                            end={{ x: 0.5, y: 0.8 }}
-                                            style={StyleSheet.absoluteFill}
-                                            pointerEvents="none"
-                                        />
-                                        <View style={[
-                                            styles.logoutIconBox, 
-                                            { 
-                                                backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : '#FFFFFF',
-                                                borderColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(239, 68, 68, 0.06)',
-                                                borderWidth: 1,
-                                            }
-                                        ]}>
+                                    <View style={[styles.logoutButton, { backgroundColor: logoutBg, borderColor: logoutBorder }]}>
+                                        <View style={[styles.logoutIconBox, { backgroundColor: schoolColorWithAlpha('#EF4444', isDark ? 0.2 : 0.1) }]}>
                                             <Ionicons name="log-out-outline" size={18} color="#EF4444" />
                                         </View>
                                         <Text style={styles.logoutText}>{userType === 'driver' ? t('driver_ui.logout') : t('logout')}</Text>
-                                        <View style={[
-                                            styles.chevronBox, 
-                                            { 
-                                                backgroundColor: isDark ? 'rgba(255,255,255,0.03)' : '#FFFFFF',
-                                                borderColor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(239, 68, 68, 0.06)',
-                                                borderWidth: 1,
-                                            }
-                                        ]}>
-                                            <Ionicons name="chevron-forward" size={13} color={isDark ? 'rgba(239, 68, 68, 0.4)' : '#FCA5A5'} />
-                                        </View>
+                                        <Ionicons name="chevron-forward" size={16} color={isDark ? '#FCA5A5' : '#F87171'} />
                                     </View>
                                 </Pressable>
-                            </Animated.View>
+                            </View>
 
                         </SafeAreaView>
                     </Animated.View>
@@ -544,8 +554,16 @@ const styles = StyleSheet.create({
     avatarRow: {
         flexDirection: 'row',
         alignItems: 'center',
-        paddingVertical: 14,
+        paddingVertical: 10,
+        gap: 8,
+    },
+
+    profileTap: {
+        flex: 1,
+        flexDirection: 'row',
+        alignItems: 'center',
         gap: 12,
+        minHeight: 52,
     },
 
     avatarRing: {
@@ -620,60 +638,116 @@ const styles = StyleSheet.create({
     },
 
     /* ── Menu Items ── */
+    searchBox: {
+        marginBottom: 8,
+        minHeight: 44,
+        paddingHorizontal: 12,
+        borderWidth: 1,
+        borderRadius: 14,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+
+    searchInput: {
+        flex: 1,
+        fontSize: 15,
+        paddingVertical: 10,
+    },
+
+    groupHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginTop: 14,
+        marginBottom: 8,
+        paddingHorizontal: 4,
+    },
+
+    groupLabel: {
+        fontSize: 11,
+        fontWeight: '800',
+        letterSpacing: 0.8,
+        textTransform: 'uppercase',
+    },
+
+    groupCount: {
+        fontSize: 11,
+        fontWeight: '700',
+    },
+
     menuList: {
-        gap: 10,
-        paddingTop: 6,
+        gap: 4,
+        paddingTop: 2,
+        paddingBottom: 12,
+    },
+
+    sectionCard: {
+        borderRadius: 16,
+        borderWidth: 1,
+        overflow: 'hidden',
+    },
+
+    rowDivider: {
+        height: StyleSheet.hairlineWidth,
+        marginLeft: 56,
     },
 
     menuCard: {
         flexDirection: 'row',
         alignItems: 'center',
-        borderRadius: 20, // Puffy clay corners
-        padding: 13,
-        paddingHorizontal: 15,
+        paddingVertical: 10,
+        paddingHorizontal: 10,
         gap: 12,
-        borderWidth: 1.2,
-        overflow: 'hidden',
-        shadowColor: '#6B7A99', // desaturated shadow color
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.04,
-        shadowRadius: 12,
-        elevation: 2,
+        minHeight: 56,
     },
 
     menuIconBox: {
         width: 34,
         height: 34,
-        borderRadius: 11,
+        borderRadius: 12,
         justifyContent: 'center',
         alignItems: 'center',
+    },
+
+    menuCopy: {
+        flex: 1,
+        gap: 1,
     },
 
     menuLabel: {
-        flex: 1,
-        fontSize: 14.5,
-        fontWeight: '700', // Puffy font weight
-        letterSpacing: 0.1,
+        fontSize: 15,
+        fontWeight: '700',
+        letterSpacing: -0.15,
     },
 
-    chevronBox: {
-        width: 22,
-        height: 22,
-        borderRadius: 11,
-        justifyContent: 'center',
+    menuHint: {
+        fontSize: 12,
+        fontWeight: '500',
+    },
+
+    emptySearch: {
         alignItems: 'center',
+        paddingTop: 28,
+        gap: 4,
     },
 
     /* ── Logout ── */
+    logoutWrap: {
+        marginTop: 4,
+        paddingTop: 12,
+        borderTopWidth: 1,
+    },
+
     logoutButton: {
         flexDirection: 'row',
         alignItems: 'center',
-        borderRadius: 20, // Clay rounded corners
-        padding: 13,
-        paddingHorizontal: 15,
+        borderRadius: 16,
+        paddingVertical: 10,
+        paddingHorizontal: 10,
         gap: 12,
-        borderWidth: 1.2,
-        overflow: 'hidden',
+        borderWidth: 1,
+        minHeight: 52,
     },
 
     logoutIconBox: {

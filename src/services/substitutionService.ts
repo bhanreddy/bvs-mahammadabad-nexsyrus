@@ -6,12 +6,16 @@ export interface SubstitutionPeriod {
   start_time: string;
   end_time: string;
   sort_order: number;
+  is_break?: boolean | null;
+  slot_type?: string | null;
 }
 
 export interface SubstitutionSlot {
   slot_id: string;
   class_section_id: string;
   period_number: number;
+  is_break?: boolean | null;
+  period_name?: string | null;
   start_time: string;
   end_time: string;
   room_no?: string | null;
@@ -26,6 +30,21 @@ export interface SubstitutionSlot {
   substitute_teacher_name?: string | null;
   reason?: string | null;
   assigned_at?: string | null;
+  is_auto_suggested?: boolean | null;
+  leave_application_id?: string | null;
+  unavailability_sources?: ('leave' | 'attendance' | 'manual')[];
+  unavailability_label?: string | null;
+}
+
+export interface UnavailableTeacher {
+  id: string;
+  teacher_name: string;
+  staff_code?: string | null;
+  sources: ('leave' | 'attendance')[];
+  source_label: string;
+  leave_status?: string | null;
+  attendance_status?: string | null;
+  affected_slots_count: number;
 }
 
 export interface SubstitutionBoard {
@@ -36,10 +55,13 @@ export interface SubstitutionBoard {
   periods: SubstitutionPeriod[];
   slots: SubstitutionSlot[];
   teachers: { id: string; teacher_name: string }[];
+  unavailable_teachers?: UnavailableTeacher[];
+  attendance_recorded?: boolean;
   summary: {
     total_slots: number;
     covered_slots: number;
     uncovered_slots: number;
+    unavailable_teachers_count?: number;
   };
 }
 
@@ -97,8 +119,8 @@ export interface MySubstitution {
 }
 
 export const SubstitutionService = {
-  getBoard(date: string): Promise<SubstitutionBoard> {
-    return api.get<SubstitutionBoard>('/substitutions/board', { date });
+  getBoard(date: string, scope: 'affected' | 'all' = 'affected'): Promise<SubstitutionBoard> {
+    return api.get<SubstitutionBoard>('/substitutions/board', { date, scope });
   },
 
   getCandidates(date: string, slotId: string): Promise<CandidateResponse> {
@@ -113,6 +135,7 @@ export const SubstitutionService = {
     slot_id: string;
     substitute_teacher_id: string;
     reason?: string;
+    supersede_substitution_id?: string;
   }): Promise<{ message: string; substitution: unknown }> {
     return api.post('/substitutions', data, { silent: true });
   },

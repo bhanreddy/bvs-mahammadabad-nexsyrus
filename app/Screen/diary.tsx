@@ -1,3 +1,4 @@
+import { TourTarget, TourScrollView } from '@/src/features/app-tour';
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View,
@@ -11,6 +12,8 @@ import {
   Modal,
   RefreshControl,
   TouchableWithoutFeedback,
+  Image,
+  ActivityIndicator,
 } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
@@ -45,6 +48,8 @@ import AppDatePicker from '@/src/components/AppDatePicker';
 import LogoLoader from '../../src/components/LogoLoader';
 import ReadAloudButton from '../../src/components/ReadAloudButton';
 import { readAloudService } from '../../src/services/readAloudService';
+import { isPhotoFallbackContent, normalizeDiaryAttachments } from '../../src/utils/smartDiary/attachments';
+import DiaryPhotoViewer from '../../src/components/diary/DiaryPhotoViewer';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -572,7 +577,7 @@ function HistoryOverview({
           : t('studentDiary.noRecentHistory')}
       </Text>
 
-      <ScrollView
+      <TourScrollView
         ref={railRef}
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -632,14 +637,63 @@ function HistoryOverview({
             </Pressable>
           );
         })}
-      </ScrollView>
+      </TourScrollView>
     </Animated.View>
   );
 }
 
 // ─── Task Card ────────────────────────────────────────────────────────────────
 
-function TaskCard({ item, index }: { item: DiaryEntry; index: number }) {
+function DiaryPhoto({ src, photos, initialIndex }: { src: string; photos: string[]; initialIndex: number }) {
+  const { theme, isDark } = useTheme();
+  const { t } = useTranslation();
+  const styles = useMemo(() => getStyles(theme, isDark), [theme, isDark]);
+  const imageSource = useMemo(() => ({ uri: src }), [src]);
+  const [status, setStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
+  const [viewerOpen, setViewerOpen] = useState(false);
+  const [askGeminiOnOpen, setAskGeminiOnOpen] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  const retry = () => {
+    setStatus('loading');
+    setAttempt((value) => value + 1);
+  };
+
+  return (
+    <>
+      <View style={styles.attachmentThumb}>
+        {status === 'failed' ? (
+          <View style={styles.photoStatus}>
+            <Ionicons name="image-outline" size={24} color={theme.colors.textMuted} />
+            <Text style={styles.photoStatusText}>{t('studentDiary.photoUnavailable')}</Text>
+            <Pressable onPress={retry} accessibilityRole="button" accessibilityLabel={t('studentDiary.retryPhoto')} style={styles.photoRetry}>
+              <Text style={[styles.photoRetryText, { color: theme.colors.primary }]}>{t('studentDiary.retry')}</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <Pressable onPress={() => { setAskGeminiOnOpen(false); setViewerOpen(true); }} disabled={status !== 'ready'} accessibilityRole="button" accessibilityLabel={t('studentDiary.openPhoto')} style={styles.photoFill}>
+            <Image
+              key={`${src}:${attempt}`}
+              source={imageSource}
+              style={styles.photoFill}
+              resizeMode="contain"
+              onLoad={() => setStatus('ready')}
+              onError={() => setStatus('failed')}
+            />
+            {status === 'loading' ? <ActivityIndicator style={styles.photoLoading} color={theme.colors.primary} /> : null}
+          </Pressable>
+        )}
+      </View>
+      <Pressable accessibilityRole="button" accessibilityLabel={t('studentDiary.gemini.button')} disabled={status !== 'ready'} onPress={() => { setAskGeminiOnOpen(true); setViewerOpen(true); }} style={{ minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 12, backgroundColor: isDark ? '#1E2945' : '#EEF2FF', opacity: status === 'ready' ? 1 : .4 }}>
+        <Ionicons name="sparkles-outline" size={18} color={theme.colors.primary} />
+        <Text style={{ flexShrink: 1, color: theme.colors.primary, fontSize: 13, fontWeight: '700' }}>{t('studentDiary.gemini.button')}</Text>
+      </Pressable>
+      {viewerOpen ? <DiaryPhotoViewer photos={photos} initialIndex={initialIndex} allowGemini initialGeminiOpen={askGeminiOnOpen} onClose={() => setViewerOpen(false)} /> : null}
+    </>
+  );
+}
+
+function TaskCard({ item, index, hideAttachments }: { item: DiaryEntry; index: number; hideAttachments?: boolean }) {
   const { t, i18n: translationI18n } = useTranslation();
   const { theme, isDark } = useTheme();
   const styles = useMemo(() => getStyles(theme, isDark), [theme, isDark]);
@@ -648,6 +702,8 @@ function TaskCard({ item, index }: { item: DiaryEntry; index: number }) {
   const dateLocale = isTelugu(translationI18n.language) ? 'te-IN' : 'en-IN';
   const localizedTitle = t_field(item.title, item.titleTe);
   const localizedContent = t_field(item.content, item.contentTe);
+  const photos = normalizeDiaryAttachments(item.attachments);
+  const photoOnly = photos.length > 0 && isPhotoFallbackContent(localizedContent);
   const dueDateText = item.homeworkDueDate
     ? `${t('studentDiary.due')} ${fromYmd(item.homeworkDueDate.slice(0, 10)).toLocaleDateString(dateLocale, { month: 'long', day: 'numeric' })}`
     : undefined;
@@ -693,8 +749,14 @@ function TaskCard({ item, index }: { item: DiaryEntry; index: number }) {
                 style={styles.readAloudButton}
               />
             </View>
-            {item.title ? <Text style={styles.taskTitle}>{localizedTitle}</Text> : null}
-            <Text style={styles.taskBody}>{localizedContent}</Text>
+            {item.title && !photoOnly ? <Text style={styles.taskTitle}>{localizedTitle}</Text> : null}
+            {!photoOnly && localizedContent ? <Text style={styles.taskBody}>{localizedContent}</Text> : null}
+            {!hideAttachments && photos.length > 0 ? (
+              <View style={styles.attachmentRow}>
+                {photos.map((src, photoIndex) => <DiaryPhoto key={src} src={src} photos={photos} initialIndex={photoIndex} />)}
+                <Text style={styles.attachmentHint}>{t('studentDiary.originalPhoto', 'Original diary photo')}</Text>
+              </View>
+            ) : null}
           </View>
         </View>
       </Pressable>
@@ -703,6 +765,23 @@ function TaskCard({ item, index }: { item: DiaryEntry; index: number }) {
 }
 
 // ─── DiaryTaskList ────────────────────────────────────────────────────────────
+
+function groupClassDiaryTasks(tasks: DiaryEntry[]) {
+  const byPhoto = new Map<string, DiaryEntry[]>();
+  for (const task of tasks) {
+    const first = normalizeDiaryAttachments(task.attachments)[0];
+    if (!first) continue;
+    const list = byPhoto.get(first) || [];
+    list.push(task);
+    byPhoto.set(first, list);
+  }
+  const bundles = [...byPhoto.values()].filter((items) => items.length > 1);
+  const bundled = new Set(bundles.flatMap((items) => items.map((item) => item.id)));
+  return {
+    bundles,
+    rest: tasks.filter((item) => !bundled.has(item.id)),
+  };
+}
 
 function DiaryTaskList({
   tasks,
@@ -740,7 +819,22 @@ function DiaryTaskList({
 
   return (
     <View style={styles.taskList}>
-      {tasks.map((item, i) => <TaskCard key={item.id} item={item} index={i} />)}
+      {groupClassDiaryTasks(tasks).bundles.map((bundle) => {
+        const photos = normalizeDiaryAttachments(bundle[0].attachments);
+        return (
+          <View key={photos[0] || bundle[0].id} style={{ gap: 8, marginBottom: 8 }}>
+            <Text style={styles.taskTitle}>{t('studentDiary.classDiary', "Today's Class Diary")}</Text>
+            {bundle.map((item, i) => <TaskCard key={item.id} item={item} index={i} hideAttachments />)}
+            {photos.length ? (
+              <View style={styles.attachmentRow}>
+                {photos.map((src, photoIndex) => <DiaryPhoto key={src} src={src} photos={photos} initialIndex={photoIndex} />)}
+                <Text style={styles.attachmentHint}>{t('studentDiary.originalPhoto', 'Original diary photo')}</Text>
+              </View>
+            ) : null}
+          </View>
+        );
+      })}
+      {groupClassDiaryTasks(tasks).rest.map((item, i) => <TaskCard key={item.id} item={item} index={i} />)}
     </View>
   );
 }
@@ -983,9 +1077,9 @@ export default function DiaryScreen() {
         />
       ) : null}
 
-      <StudentHeader showBackButton title={t('home.diary', 'Diary')} />
+      <TourTarget id="screen.screen-diary.overview"><StudentHeader showBackButton title={t('home.diary', 'Diary')} /></TourTarget>
 
-      <ScrollView
+      <TourScrollView
         style={styles.scroll}
         contentContainerStyle={[styles.scrollContent, { paddingHorizontal: hPad }]}
         showsVerticalScrollIndicator={false}
@@ -1043,9 +1137,9 @@ export default function DiaryScreen() {
           </Animated.View>
 
           {/* ── Tab Switcher ──────────────────────────── */}
-          <Animated.View entering={FadeInDown.delay(120).duration(500).springify()} style={styles.tabWrap}>
-            <TabSwitcher active={activeTab} onChange={onTabChange} />
-          </Animated.View>
+          <TourTarget id="student.diary.date" native><Animated.View entering={FadeInDown.delay(120).duration(500).springify()} style={styles.tabWrap}>
+            <TourTarget id="screen.screen-diary.workspace"><TabSwitcher active={activeTab} onChange={onTabChange} /></TourTarget>
+          </Animated.View></TourTarget>
 
           {/* ── History: date selector ────────────────── */}
           {activeTab === 'history' ? (
@@ -1073,7 +1167,7 @@ export default function DiaryScreen() {
           ) : null}
 
           {/* ── Task content ──────────────────────────── */}
-          <Animated.View
+          <TourTarget id="student.diary.entries" native><Animated.View
             key={activeDate}
             entering={FadeInDown.delay(60).duration(360).springify()}
           >
@@ -1097,10 +1191,10 @@ export default function DiaryScreen() {
                 )}
               />
             ) : null}
-          </Animated.View>
+          </Animated.View></TourTarget>
 
         </View>
-      </ScrollView>
+      </TourScrollView>
 
       {/* ── Date Picker Bottom Sheet ──────────────── */}
       <DatePickerSheet
@@ -1233,6 +1327,18 @@ const getStyles = (theme: SchoolTheme, isDark: boolean) =>
     dueText: { fontSize: 11, color: theme.colors.textMuted, fontWeight: '600' },
     taskTitle: { fontSize: 15, fontWeight: '700', color: theme.colors.textStrong, letterSpacing: -0.3, lineHeight: 21 },
     taskBody: { fontSize: 13, color: theme.colors.textSecondary, lineHeight: 19 },
+    attachmentRow: { marginTop: 10, gap: 6 },
+    attachmentThumb: { width: '100%', height: 220, borderRadius: 16, overflow: 'hidden', backgroundColor: 'rgba(15,23,42,0.06)' },
+    attachmentHint: { fontSize: 11, fontWeight: '600', color: theme.colors.textTertiary },
+    photoFill: { width: '100%', height: '100%' },
+    photoLoading: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
+    photoStatus: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 16 },
+    photoStatusText: { fontSize: 13, fontWeight: '600', color: theme.colors.textSecondary },
+    photoRetry: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 12, borderWidth: 1, borderColor: theme.colors.primary },
+    photoRetryText: { fontSize: 13, fontWeight: '700' },
+    photoViewerOverlay: { flex: 1, backgroundColor: 'rgba(11,16,32,0.92)', alignItems: 'center', justifyContent: 'center', padding: 16 },
+    photoViewerImage: { width: '100%', height: '80%' },
+    photoViewerRetryText: { fontSize: 13, fontWeight: '700', color: '#FFFFFF' },
 
     // Empty state
     emptyCard: {

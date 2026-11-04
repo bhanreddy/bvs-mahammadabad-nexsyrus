@@ -1,3 +1,4 @@
+import { TourTarget, TourScrollView } from '@/src/features/app-tour';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
@@ -20,7 +21,7 @@ import { StaffMyProfile, StaffService } from '../../src/services/staffService';
 import { SchoolProfile, SchoolService } from '../../src/services/schoolService';
 import { useAuth } from '../../src/hooks/useAuth';
 import { useTheme } from '../../src/hooks/useTheme';
-import { downloadPayslipPdf, PayslipPdfRow } from '../../src/utils/payslipPdf';
+import { downloadPayslipPdf, payslipAttendanceRows, PayslipPdfRow } from '../../src/utils/payslipPdf';
 import { bundledAssetToBase64Uri, resolveApiAssetUrl, toBase64Uri } from '../../src/utils/toBase64Uri';
 import { SCHOOL_LOGO } from '../../src/constants/school';
 import { Theme } from '../../src/theme/themes';
@@ -121,10 +122,10 @@ export default function PaySlip() {
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#fff" />
-      <StaffHeader title="My Pay Slips" showBackButton={true} />
+      <StatusBar barStyle="dark-content" />
+      <TourTarget id="screen.staff-payslip.overview"><StaffHeader title="My Pay Slips" showBackButton={true} /></TourTarget>
       {isViewingAsAdmin && <ViewAsBanner name={viewAsName} />}
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      <TourTarget id="screen.staff-payslip.workspace" native><TourScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         {!configLoading && !payslipsEnabled ? (
           <View style={styles.emptyContainer}>
             <Ionicons name="eye-off-outline" size={40} color="#94A3B8" />
@@ -193,6 +194,28 @@ export default function PaySlip() {
                       <Text style={styles.netValue}>{item.net}</Text>
                     </View>
                   </View>
+                  {item.amount_in_words ? (
+                    <Text style={styles.wordsText}>{item.amount_in_words}</Text>
+                  ) : null}
+                  {item.attendance ? (
+                    <View style={styles.lineList}>
+                      {payslipAttendanceRows(item.attendance, item.per_day_salary).map((row) => (
+                        <Text key={`${item.id}-${row.label}`} style={styles.summaryLine}>
+                          {row.label}: {row.value}
+                        </Text>
+                      ))}
+                    </View>
+                  ) : null}
+                  {item.lines?.length ? (
+                    <View style={styles.lineList}>
+                      {item.lines.map((line, lineIndex) => (
+                        <View key={`${item.id}-${lineIndex}`} style={styles.lineItem}>
+                          <Text style={styles.lineName}>{line.name}</Text>
+                          <Text style={styles.lineExplanation}>{line.explanation}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  ) : null}
                   <TouchableOpacity
                     style={[styles.downloadButton, isDownloading && styles.downloadButtonDisabled]}
                     onPress={() => handleDownload(item)}
@@ -213,7 +236,7 @@ export default function PaySlip() {
         )}
         </>
         )}
-      </ScrollView>
+      </TourScrollView></TourTarget>
     </View>
   );
 }
@@ -345,6 +368,37 @@ const getStyles = (theme: Theme) =>
       fontSize: 16,
       fontWeight: 'bold',
       color: '#111827',
+    },
+    wordsText: {
+      marginTop: 12,
+      color: '#334155',
+      fontSize: 13,
+      fontWeight: '600',
+    },
+    summaryLine: {
+      marginTop: 8,
+      color: '#64748B',
+      fontSize: 12,
+    },
+    lineList: {
+      marginTop: 12,
+      gap: 8,
+    },
+    lineItem: {
+      backgroundColor: '#F8FAFC',
+      borderRadius: 10,
+      padding: 10,
+    },
+    lineName: {
+      color: '#0F172A',
+      fontSize: 13,
+      fontWeight: '700',
+    },
+    lineExplanation: {
+      marginTop: 4,
+      color: '#475569',
+      fontSize: 12,
+      lineHeight: 18,
     },
     downloadButton: {
       flexDirection: 'row',

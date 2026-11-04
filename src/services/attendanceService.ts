@@ -55,10 +55,21 @@ export const AttendanceService = {
     /**
      * Mark attendance (bulk)
      */
-    markAttendance: async (data: MarkAttendanceRequest): Promise<{ success: boolean; count: number }> => {
+    markAttendance: async (data: MarkAttendanceRequest): Promise<{ success?: boolean; count: number }> => {
         // The screen owns the submit error dialog so users see one actionable
         // message instead of the API client alert followed by a generic alert.
-        return api.post<{ success: boolean; count: number }>('/attendance', data, { silent: true });
+        return api.post<{ success?: boolean; count: number }>('/attendance', data, { silent: true });
+    },
+
+    /**
+     * Soft-delete every attendance record for one class on one day.
+     */
+    clearDayAttendance: async (
+        classSectionId: string,
+        date: string
+    ): Promise<{ message: string; date: string; count: number }> => {
+        const params = new URLSearchParams({ class_section_id: classSectionId, date });
+        return api.delete(`/attendance/day?${params.toString()}`, { silent: true });
     },
 
     /**
@@ -120,6 +131,14 @@ export const AttendanceService = {
             morning_status: string | null;
             afternoon_status: string | null;
             marked_at: string | null;
+            consecutive_absence_days?: number;
+            absence_streak_start_date?: string | null;
+            absence_streak_end_date?: string | null;
+            absence_streak_dates?: Array<{ date: string; status: string }>;
+            monthly_attendance_percentage?: number | null;
+            absence_risk_level?: 'none' | 'absence' | 'attention' | 'persistent' | 'irregular' | null;
+            is_irregular?: boolean;
+            monthly_absent_count?: number;
         }>;
     } | null> => {
         try {

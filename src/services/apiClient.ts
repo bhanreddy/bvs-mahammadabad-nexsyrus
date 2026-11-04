@@ -8,7 +8,9 @@ import { API_URL, SCHOOL_ID } from '../constants/school';
 import { supabase } from './supabaseConfig';
 import { getOrCreateDeviceId } from './deviceId';
 import { getActiveContextId } from './activeContextStore';
-import { clearStaffPortalSession, getStaffPortalSession } from './staffPortalSession';
+import { clearStaffPortalSession, getStaffPortalSession, shouldAttachStaffPortalHeader } from './staffPortalSession';
+import { staffBiometricService } from './staffBiometricService';
+import * as Crypto from 'expo-crypto';
 
 /**
  * Cross-platform error alert — always uses the illustrated CustomAlert popup.
@@ -55,7 +57,7 @@ export const getApiBaseUrl = () => {
   return url;
 };
 
-const API_BASE_URL = getApiBaseUrl();
+export const API_BASE_URL = getApiBaseUrl();
 
 const TOKEN_KEY = 'access_token';
 const REFRESH_TOKEN_KEY = 'refresh_token';
@@ -107,7 +109,8 @@ export async function clearTokens(): Promise<void> {
 
 export type SessionRecoveryReason = 'missing' | 'expired' | 'unauthorized';
 type SessionRecoveryCallback = (
-  reason: SessionRecoveryReason
+  reason: SessionRecoveryReason,
+  rejectedAccessToken?: string,
 ) => Promise<Session | null>;
 let sessionRecoveryCallback: SessionRecoveryCallback | null = null;
 let recoveryPromise: Promise<Session | null> | null = null;
@@ -124,11 +127,12 @@ export const registerSessionRecoveryCallback = (
 };
 
 async function attemptSessionRecovery(
-  reason: SessionRecoveryReason
+  reason: SessionRecoveryReason,
+  rejectedAccessToken?: string,
 ): Promise<Session | null> {
   if (recoveryPromise) return recoveryPromise;
   recoveryPromise = (async () => {
-    if (sessionRecoveryCallback) return sessionRecoveryCallback(reason);
+    if (sessionRecoveryCallback) return sessionRecoveryCallback(reason, rejectedAccessToken);
     const { data, error } = await supabase.auth.refreshSession();
     return error ? null : data.session;
   })().finally(() => {
@@ -146,6 +150,20 @@ function canRecoverAuthForEndpoint(endpoint: string): boolean {
 }
 
 const MAX_TRANSIENT_READ_RETRIES = 4;
+const MAX_WEB_NETWORK_READ_RETRIES = 1;
+// A gateway timeout has already consumed about 20 seconds. Retrying it four
+// times turns one dashboard load into a two-minute retry storm, so allow only
+// one immediate retry and defer longer Retry-After windows to the query hooks.
+const MAX_GATEWAY_READ_RETRIES = 1;
+const MAX_INLINE_RETRY_AFTER_MS = 5000;
+
+// These 503s mean a feature is not wired up yet. Retrying them only spams the
+// backend; the response will not change until env/config is updated.
+const NON_TRANSIENT_UNAVAILABLE_CODES = new Set([
+  'BILLING_NOT_CONFIGURED',
+  'CLUSTER_NOT_CONFIGURED',
+  'PHONEPE_NOT_CONFIGURED',
+]);
 
 function transientRetryDelay(attempt: number): number {
   return Math.min(500 * Math.pow(2, attempt), 5000);
@@ -196,6 +214,7 @@ export class APIError extends Error {
 
 // Generic API request function
 export interface APIOptions extends RequestInit {
+  transportIdentity?: { authUserId: string; contextId: string | null };
   silent?: boolean;
   /**
    * Kept for call-site compatibility. Active portal context is now attached to
@@ -210,6 +229,23 @@ export interface APIOptions extends RequestInit {
   timeoutMs?: number;
   /** Frozen delegated staff target for retries and GET de-duplication. */
   _staffPortalId?: string;
+  /** Public endpoint: never attach or recover a persisted Supabase session. */
+  omitAuth?: boolean;
+}
+
+/**
+ * Endpoints are relative to API_BASE_URL, which already includes `/api/v1`.
+ * Call sites that pass `/api/v1/...` would otherwise hit `/api/v1/api/v1/...`.
+ */
+export function normalizeApiEndpoint(endpoint: string, baseUrl: string = API_BASE_URL): string {
+  const trimmedBase = baseUrl.replace(/\/+$/, '');
+  const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  if (!trimmedBase.endsWith('/api/v1')) return path;
+  if (path === '/api/v1' || path.startsWith('/api/v1/')) {
+    const stripped = path.slice('/api/v1'.length);
+    return stripped.startsWith('/') ? stripped : `/${stripped}`;
+  }
+  return path;
 }
 
 function buildGetDedupeKey(endpoint: string, method: string, staffPortalId?: string): string | null {
@@ -223,8 +259,10 @@ export async function apiRequest<T>(
   endpoint: string,
   options: APIOptions = {})
   : Promise<T> {
+  endpoint = normalizeApiEndpoint(endpoint);
   const method = (options.method || 'GET').toUpperCase();
-  const staffPortalId = options._staffPortalId ?? getStaffPortalSession().staffId;
+  const staffPortalId = options._staffPortalId
+    ?? (shouldAttachStaffPortalHeader(endpoint) ? getStaffPortalSession().staffId : undefined);
   const frozenOptions = staffPortalId && !options._staffPortalId
     ? { ...options, _staffPortalId: staffPortalId }
     : options;
@@ -260,24 +298,27 @@ async function apiRequestInner<T>(
   endpoint: string,
   options: APIOptions = {})
   : Promise<T> {
-  const { silent: rawSilent, sendActiveContext, _isRetry, _retryCount = 0, _multipart, timeoutMs = 60000, _staffPortalId, ...fetchOptions } = options;
+  const { transportIdentity, silent: rawSilent, sendActiveContext, _isRetry, _retryCount = 0, _multipart, timeoutMs = 60000, _staffPortalId, omitAuth = false, ...fetchOptions } = options;
   // Suppress blocking error dialogs for transient cross-role failures while an
   // account/portal switch is settling (the request still runs and still throws).
   const silent = rawSilent || transientAlertsSuppressed();
   const isMultipart = _multipart === true;
-  const { data: { session: liveSession } } = await supabase.auth.getSession();
+  const liveSession = omitAuth ? null : (await supabase.auth.getSession()).data.session;
   let session = liveSession;
   const sessionExpiresSoon =
     !session?.expires_at ||
     session.expires_at <= Math.floor(Date.now() / 1000) + EXPIRY_SKEW_SECONDS;
   if (
-    sessionExpiresSoon &&
+    !omitAuth && sessionExpiresSoon &&
     !_isRetry &&
     canRecoverAuthForEndpoint(endpoint)
   ) {
     session = (
       await attemptSessionRecovery(session ? 'expired' : 'missing')
     ) ?? session;
+  }
+  if (transportIdentity && (session?.user.id !== transportIdentity.authUserId || await getActiveContextId() !== transportIdentity.contextId)) {
+    throw new Error('Tracking identity changed');
   }
   const token = session?.access_token ?? null;
 
@@ -294,13 +335,18 @@ async function apiRequestInner<T>(
   if (!isMultipart) {
     headers['Content-Type'] = 'application/json';
   }
+  if (!headers['X-Request-Id'] && !headers['x-request-id']) {
+    headers['X-Request-Id'] = `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  }
 
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
-  if (_staffPortalId) {
+  if (_staffPortalId && !omitAuth) {
     headers['X-Staff-Portal-Id'] = _staffPortalId;
   }
+
+  const method = (fetchOptions.method || 'GET').toUpperCase();
 
   // A portal switch changes the active server-side authorization scope, not
   // merely the screen shown by the app. Previously these headers were only
@@ -310,16 +356,41 @@ async function apiRequestInner<T>(
   //
   // Vault account switching uses a different JWT and clears this stored value,
   // so it remains isolated from the selected portal context.
+  let deviceProofExpected = false;
   try {
     const deviceId = await getOrCreateDeviceId();
     if (deviceId) headers['X-Device-Id'] = deviceId;
-    const activeContextId = await getActiveContextId();
+    const activeContextId = omitAuth ? null : await getActiveContextId();
     if (activeContextId) headers['X-Active-Context'] = activeContextId;
+    const reg = await staffBiometricService.getStoredRegistration();
+    if (reg.devicePublicKey && reg.keyAlias) {
+      const headerKey = reg.devicePublicKey.replace(/\r?\n/g, '\\n');
+      headers['X-Device-Public-Key'] = headerKey;
+      headers['X-Device-Session-Key'] = headerKey;
+      const proofPath = endpoint.split('?')[0];
+      if (proofPath === '/attendance/v2/challenge' || proofPath === '/attendance/v2/verify') {
+        deviceProofExpected = true;
+        const proofTimestamp = String(Date.now());
+        const proofNonce = Crypto.randomUUID();
+        const proofPayload = `staff-device-session:v1:${proofTimestamp}:${proofNonce}:${method}:${proofPath}`;
+        headers['X-Device-Proof-Timestamp'] = proofTimestamp;
+        headers['X-Device-Proof-Nonce'] = proofNonce;
+        headers['X-Device-Proof'] = await staffBiometricService.signDeviceSession(proofPayload, reg.keyAlias);
+      }
+    }
   } catch {
-    // Context persistence is best-effort; never block an otherwise valid API request.
+    if (deviceProofExpected) {
+      clearTimeout(timeoutId);
+      throw new APIError(
+        'This request could not be signed by the approved staff device. Please reopen the app or contact the administrator.',
+        403,
+        undefined,
+        undefined,
+        'DEVICE_PROOF_FAILED'
+      );
+    }
+    // Context persistence is best-effort before a staff device is registered.
   }
-
-  const method = (fetchOptions.method || 'GET').toUpperCase();
 
   // SchoolIMS: every request MUST include school_id (GET/DELETE: query; POST/PUT/PATCH: body)
   let finalEndpoint = endpoint;
@@ -343,6 +414,7 @@ async function apiRequestInner<T>(
   const url = `${API_BASE_URL}${finalEndpoint}`;
 
   try {
+    if (transportIdentity && (await getActiveContextId() !== transportIdentity.contextId || (await supabase.auth.getSession()).data.session?.user.id !== transportIdentity.authUserId)) throw new Error('Tracking identity changed');
     const response = await fetch(url, {
       ...fetchOptions,
       body: finalBody,
@@ -367,6 +439,24 @@ async function apiRequestInner<T>(
 
       // Handle unauthorized (401)
       if (response.status === 401) {
+        const authPath = endpoint.split('?')[0];
+        if (authPath === '/auth/qr/resolve' || authPath === '/auth/validate-school-user') {
+          throw new APIError(
+            errorData.message || errorData.error || 'This login QR is no longer valid.',
+            401,
+            undefined,
+            requestId,
+            errorData.code,
+          );
+        }
+        // A rejected attendance signature/challenge is not an expired login.
+        // Preserve protocol codes and never replay it through session recovery.
+        if (endpoint.split('?')[0] === '/attendance/v2/verify' && [
+          'INVALID_SIGNATURE', 'PAYLOAD_CONTEXT_MISMATCH', 'CHALLENGE_NOT_FOUND',
+          'CHALLENGE_ALREADY_USED', 'CHALLENGE_EXPIRED', 'DEVICE_NOT_APPROVED',
+        ].includes(errorData.code)) {
+          throw new APIError(errorData.error, 401, undefined, requestId, errorData.code);
+        }
 
         // 1. IGNORE Login/Refresh endpoints (invalid credentials, not session expiry)
         if (endpoint.includes('/login') || endpoint.includes('/refresh')) {
@@ -382,7 +472,7 @@ async function apiRequestInner<T>(
         // Every 401 enters the same single-flight recovery pipeline. It first
         // rotates the refresh token and can fall back to the native saved login.
         if (!_isRetry && canRecoverAuthForEndpoint(endpoint)) {
-          const recovered = await attemptSessionRecovery('unauthorized').catch(() => null);
+          const recovered = await attemptSessionRecovery('unauthorized', token ?? undefined).catch(() => null);
           if (recovered) {
             await setTokens(recovered.access_token, recovered.refresh_token);
             return await apiRequest<T>(endpoint, {
@@ -414,10 +504,22 @@ async function apiRequestInner<T>(
       // and safe to retry, so they get the same silent retry-then-fail path
       // instead of surfacing as a hard error popup.
       if (response.status === 503 || response.status === 502 || response.status === 504) {
-        if (method === 'GET' && _retryCount < MAX_TRANSIENT_READ_RETRIES) {
+        const isConfigUnavailable = NON_TRANSIENT_UNAVAILABLE_CODES.has(errorData.code);
+        const retryAfterHeader = response.headers.get('Retry-After');
+        const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
+        const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+          ? retryAfterSeconds * 1000
+          : transientRetryDelay(_retryCount);
+        const canRetryInline = retryAfterMs <= MAX_INLINE_RETRY_AFTER_MS;
+        if (
+          !isConfigUnavailable &&
+          canRetryInline &&
+          method === 'GET' &&
+          _retryCount < MAX_GATEWAY_READ_RETRIES
+        ) {
           await new Promise((r) => setTimeout(
             r,
-            transientRetryDelay(_retryCount)
+            retryAfterMs
           ));
           return await apiRequestInner<T>(endpoint, {
             ...options,
@@ -425,7 +527,7 @@ async function apiRequestInner<T>(
           });
         }
         const message = errorData.error || 'Server temporarily unavailable. Please try again.';
-        throw new APIError(message, response.status, undefined, requestId);
+        throw new APIError(message, response.status, undefined, requestId, errorData.code);
       }
 
       // Handle validation errors (422) and B1-style 400 (school_id required)
@@ -477,7 +579,16 @@ async function apiRequestInner<T>(
       if (response.status === 403) {
         const message = errorData.error || errorData.message || 'Access denied';
         const code = errorData.code;
-        if (!silent) alertFn('Access Denied', message);
+        const isFeatureRestriction = Boolean(errorData.access) || [
+          'PLAN_REQUIRED',
+          'FEATURE_DISABLED',
+          'COMING_SOON',
+          'BETA',
+          'MAINTENANCE',
+          'TEMPORARILY_UNAVAILABLE',
+        ].includes(code);
+
+        if (!silent && !isFeatureRestriction) alertFn('Access Denied', message);
         throw new APIError(message, 403, undefined, requestId, code);
       }
 
@@ -489,7 +600,8 @@ async function apiRequestInner<T>(
         genericMsg,
         response.status,
         undefined,
-        requestId
+        requestId,
+        errorData.code
       );
     }
 
@@ -517,7 +629,28 @@ async function apiRequestInner<T>(
       throw error;
     }
 
-    if (method === 'GET' && _retryCount < MAX_TRANSIENT_READ_RETRIES) {
+    // The request already consumed its full timeout budget. Let the persisted
+    // query hooks retry later instead of immediately spending another minute.
+    if (error?.name === 'AbortError') {
+      if (endpoint.split('?')[0] === '/auth/qr/resolve') {
+        throw new APIError(
+          'SchoolIMS took too long to respond. Please try again.',
+          408,
+          undefined,
+          undefined,
+          'QR_SERVER_ERROR',
+        );
+      }
+      throw new APIError('Data refresh timed out and will retry later.', 0);
+    }
+
+    // Browsers intentionally hide a cross-origin gateway response when the edge
+    // omits CORS headers, presenting it as a generic TypeError. Cap that path as
+    // well; otherwise one 22-second 504 is multiplied into five invisible calls.
+    const maxNetworkRetries = Platform.OS === 'web'
+      ? MAX_WEB_NETWORK_READ_RETRIES
+      : MAX_TRANSIENT_READ_RETRIES;
+    if (method === 'GET' && _retryCount < maxNetworkRetries) {
       await waitForNetworkRestore();
       await new Promise((resolve) =>
         setTimeout(resolve, transientRetryDelay(_retryCount))
@@ -526,10 +659,6 @@ async function apiRequestInner<T>(
         ...options,
         _retryCount: _retryCount + 1,
       });
-    }
-
-    if (error?.name === 'AbortError') {
-      throw new APIError('Data refresh timed out and will retry later.', 0);
     }
 
     // Do not raise a blocking connection popup. Query hooks retain cached data
@@ -541,6 +670,7 @@ async function apiRequestInner<T>(
 
 /** Download a binary file (e.g. Excel) using the same Supabase auth as apiRequest. */
 export async function downloadFile(endpoint: string, filename: string): Promise<void> {
+  endpoint = normalizeApiEndpoint(endpoint);
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token ?? null;
 
@@ -549,7 +679,9 @@ export async function downloadFile(endpoint: string, filename: string): Promise<
   const url = `${API_BASE_URL}${finalEndpoint}`;
 
   const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const staffPortalId = getStaffPortalSession().staffId;
+  const staffPortalId = shouldAttachStaffPortalHeader(endpoint)
+    ? getStaffPortalSession().staffId
+    : undefined;
   if (staffPortalId) headers['X-Staff-Portal-Id'] = staffPortalId;
   try {
     const deviceId = await getOrCreateDeviceId();
@@ -606,7 +738,11 @@ export async function downloadFile(endpoint: string, filename: string): Promise<
   await Sharing.shareAsync(uri, {
     mimeType: response.headers.get('content-type') || 'application/octet-stream',
     dialogTitle: `Save ${filename}`,
-    UTI: 'org.openxmlformats.spreadsheetml.sheet',
+    UTI: filename.toLowerCase().endsWith('.xlsx')
+      ? 'org.openxmlformats.spreadsheetml.sheet'
+      : filename.toLowerCase().endsWith('.html')
+        ? 'public.html'
+        : 'public.data',
   });
 }
 
@@ -615,8 +751,14 @@ export const api = {
   get: <T,>(endpoint: string, params?: Record<string, any>, options?: APIOptions): Promise<T> => {
     let queryString = '';
     if (params) {
-      const cleanParams = Object.fromEntries(
-        Object.entries(params).filter(([_, v]) => v !== undefined)
+      const actualParams =
+        params.params && typeof params.params === 'object' && !Array.isArray(params.params)
+          ? params.params
+          : params;
+      const cleanParams: Record<string, string> = Object.fromEntries(
+        Object.entries(actualParams)
+          .filter(([_, v]) => v !== undefined)
+          .map(([k, v]) => [k, String(v)])
       );
       queryString = '?' + new URLSearchParams(cleanParams).toString();
     }
@@ -664,3 +806,5 @@ export const api = {
     return downloadFile(endpoint, filename);
   },
 };
+
+export const apiClient = api;
